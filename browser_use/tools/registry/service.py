@@ -495,6 +495,12 @@ class Registry(Generic[Context]):
 
 		Each action model contains only the specific action being used,
 		rather than all actions with most set to None.
+
+		函数返回的是「类对象」（比如 ClickActionModel），不是实例（比如 ActionModel()
+		
+		create_action_model 是动态生成适配场景的 ActionModel 子类 / 联合类，
+		而 ClickAction = ActionModel(click=...) 是用这个动态类创建具体的动作实例
+
 		"""
 		from typing import Union
 

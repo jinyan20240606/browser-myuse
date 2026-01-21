@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 
 from browser_use.logging_config import setup_logging
 
-# Only set up logging if not in MCP mode or if explicitly requested
+# 只有在非 MCP 模式下或明确请求时才设置日志记录 (Only set up logging if not in MCP mode or if explicitly requested)
 if os.environ.get('BROWSER_USE_SETUP_LOGGING', 'true').lower() != 'false':
 	from browser_use.config import CONFIG
 
@@ -18,6 +18,8 @@ else:
 
 	logger = logging.getLogger('browser_use')
 
+# Monkeypatch BaseSubprocessTransport.__del__ 以优雅地处理已关闭的事件循环
+# 这修复了 Python asyncio 中的一个已知问题：当事件循环关闭时，子进程传输对象的析构函数可能会抛出错误
 # Monkeypatch BaseSubprocessTransport.__del__ to handle closed event loops gracefully
 from asyncio import base_subprocess
 
@@ -25,6 +27,10 @@ _original_del = base_subprocess.BaseSubprocessTransport.__del__
 
 
 def _patched_del(self):
+	"""
+	修补后的 __del__ 方法，用于处理已关闭的事件循环，
+	避免抛出像 RuntimeError: Event loop is closed 这样的干扰性错误。
+	"""
 	"""Patched __del__ that handles closed event loops without throwing noisy red-herring errors like RuntimeError: Event loop is closed"""
 	try:
 		# Check if the event loop is closed before calling the original
@@ -43,7 +49,8 @@ def _patched_del(self):
 base_subprocess.BaseSubprocessTransport.__del__ = _patched_del
 
 
-# Type stubs for lazy imports - fixes linter warnings
+# 延迟导入的类型存根 - 修复 linter 警告 (Type stubs for lazy imports - fixes linter warnings)
+# 这些导入仅在类型检查期间执行，运行时不会加载，从而提高启动速度
 if TYPE_CHECKING:
 	from browser_use.agent.prompts import SystemPrompt
 	from browser_use.agent.service import Agent
@@ -68,7 +75,9 @@ if TYPE_CHECKING:
 	from browser_use.sandbox import sandbox
 	from browser_use.tools.service import Controller, Tools
 
-	# Lazy imports mapping - only import when actually accessed
+	# 延迟导入映射表 - 仅在实际访问时导入 (Lazy imports mapping - only import when actually accessed)
+	# 定义了所有可用的导入项，包括 Agent、浏览器、工具、LLM 模型等
+	# 这种机制避免了一次性加载所有模块，显著减少了初始导入时间
 _LAZY_IMPORTS = {
 	# Agent service (heavy due to dependencies)
 	# 'Agent': ('browser_use.agent.service', 'Agent'),
@@ -108,6 +117,30 @@ _LAZY_IMPORTS = {
 
 
 def __getattr__(name: str):
+	"""
+	延迟导入机制 - 仅在实际访问模块时导入它们。
+	当访问模块属性时触发，检查属性是否在延迟导入映射中。
+	如果存在，动态导入相应模块并缓存到全局命名空间，
+	这样第二次访问同一属性时就不需要重新导入。
+	
+	例如，当用户执行以下代码时会调用此函数：
+	```python
+	# 这是浅路径写法，只导入顶层模块，依赖 browser_use/__init__.py 中的 __getattr__ 魔术方法才能生效；
+	from browser_use import Agent  # 此时会触发 __getattr__('Agent')
+	agent = Agent(...)  # 实际上是调用了延迟导入的 Agent 类
+	# 顶部仅导入模块，不导入具体类，首次使用时即Agent()时才真正导入
+	```
+	
+	这个函数是 Python 的魔术方法，在访问模块中不存在的属性时自动调用。
+	通过这种方式，我们实现了按需加载，而不是在模块导入时加载所有内容。
+
+	如果使用传统的静态导入（Static Import），通常会写在文件顶部，例如：
+	```python
+	from browser_use.agent.service import Agent
+	from browser_use.browser import BrowserSession as Browser
+	```
+	静态导入会在模块初始化时立即加载所有依赖，导致启动变慢。
+	"""
 	"""Lazy import mechanism - only import modules when they're actually accessed."""
 	if name in _LAZY_IMPORTS:
 		module_path, attr_name = _LAZY_IMPORTS[name]
@@ -129,6 +162,10 @@ def __getattr__(name: str):
 	raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 
+# 定义模块的公共 API (Define the module's public API)
+# __all__ 指定了当使用 `from browser_use import *` 时应该导入哪些名称
+# 它也帮助 IDE 和文档工具识别哪些是模块的公共接口
+# 这个列表必须与 _LAZY_IMPORTS 映射表中的键保持一致
 __all__ = [
 	'Agent',
 	'CodeAgent',

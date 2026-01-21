@@ -537,6 +537,17 @@ class ProxySettings(BaseModel):
 
 class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, BrowserLaunchArgs, BrowserNewContextArgs):
 	"""
+	继承 Playwright 多个浏览器参数类，整合所有启动 / 连接 / 上下文相关参数，统一管理
+
+	开发者无需手动拼接 Playwright 启动参数，只需配置 BrowserProfile 即可快速生成适配不同场景的浏览器实例（本地 / 云端、带扩展 / 无扩展、代理 / 无代理等）。
+	
+	支持以下参数：
+	
+	- BrowserConnectArgs,          # 对应 playwright.chromium.connect(**kwargs) 的参数
+    - BrowserLaunchPersistentContextArgs,  # 对应 launch_persistent_context 的参数
+    - BrowserLaunchArgs,           # 对应 playwright.chromium.launch(**kwargs) 的参数
+    - BrowserNewContextArgs        # 对应 browser.new_context(**kwargs) 的参数
+
 	A BrowserProfile is a static template collection of kwargs that can be passed to:
 		- BrowserType.launch(**BrowserLaunchArgs)
 		- BrowserType.connect(**BrowserConnectArgs)

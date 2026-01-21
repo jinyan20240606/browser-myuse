@@ -94,6 +94,13 @@ def _log_format_message_line(message: BaseMessage, content: str, is_last_message
 
 
 class MessageManager:
+	"""
+	MessageManager 的核心定位：是智能体和 LLM 交互的 “消息中枢”，负责：
+		- 动态生成适配不同模型 / 模式的系统提示词；
+		- 管理对话历史（截断、保存、恢复）；
+		- 整合任务、状态、配置等信息，为每次 LLM 调用生成完整的输入提示词。
+		- 系统提示词的动态性：注释提到 “会在每个步骤中更新”，意味着后续智能体每执行一步动作，MessageManager 都会重新生成系统提示词（比如补充新的动作历史、调整可用动作列表）。
+	"""
 	vision_detail_level: Literal['auto', 'low', 'high']
 
 	def __init__(

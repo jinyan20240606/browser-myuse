@@ -1,5 +1,38 @@
 # Browser-Use 架构原理
 
+## 前置概念
+
+1. 可访问性树（AX Tree）：浏览器基于 DOM 树生成的语义化子集树状结构，仅保留有语义的元素，过滤装饰性 / 隐藏元素，专为辅助技术设计
+   1. AX Tree 节点包含 3 类核心信息 —— 角色（role，如 button/link）、名称（name，可读文本）、状态（states，如 disabled/hidden）；
+   2. 获取完整 AX Tree —— 借助浏览器 CDP 协议（推荐），原生js获取不到完整的，只能单个节点获取属性进行手动拼接
+   3. 优势：
+      1. 精准定位元素：传统 DOM 定位可能依赖 id/class（易变），而 AX Tree 按 “语义” 定位（比如 “找到角色为 button、名称为‘提交’且状态为 disabled 的元素”），更适配 AI/Agent 自动操控浏览器的场景；
+      2. 理解页面意图：Agent 不仅能 “看到” DOM 标签，还能 “理解” 元素的实际功能（比如区分 “装饰性 div” 和 “真正的按钮”），提升任务执行的准确性（比如你的 Agent 要点击 “提交” 按钮，不会误点装饰元素）。
+
+2. DOM 树：网页的完整结构树，包含所有标签、属性、文本
+   1. 包含所有元素，无语义过滤
+3. 无障碍属性（aria-*）：手动为元素补充的可访问性属性（如 aria-label、aria-disabled）
+
+### 执行器相关策略
+> 动作执行器 (`_execute_actions` -> `multi_act中的概念
+1. browser_state_summary字段含义：浏览器状态摘要对象（包含 DOM 缓存、窗口状态、Cookie 等），为None时跳过历史记录创建
+1. 预处理浏览器缓存的DOM选择器映射
+   1. 作用：缓存的DOM选择器映射本质是一个 **“元素唯一标识 ↔ 定位该元素的选择器”** 的键值对字典，核心是把 “找元素的结果” 存起来，下次不用再重新找
+   2. browser_session._cached_browser_state_summary：当前浏览器状态摘要（browser_state_summary，比如页面 URL、关键元素、已执行动作和缓存的DOM选择器映射）；
+      1. dom_state.selector_map：缓存的DOM选择器映射
+      2. cached_element_hashes：缓存的DOM选择器映射的元素hash值集合
+         1. hash的生成方式：元素：`<button id="login" class="btn">登录</button>` ，组合字符串：button-id=login-class=btn-text=登录，哈希：md5(组合字符串) == 8f9b9c8a7d6e5f4g3h2j1k0l
+```python
+   dom_state.selector_map = {
+    "goods_title_10086": "#J_ItemTitle",
+    "goods_price_10086": ".price.J_price",
+    "buy_button_10086": "#J_LinkBuy",
+    "add_cart_button_10086": "#J_LinkBasket"
+} 
+# 对应的cached_element_hashes就是这些标识的集合：
+cached_element_hashes = {"goods_title_10086", "goods_price_10086", ...}
+```
+
 ## 核心架构
 
 Browser-Use 是一个基于 LLM 的浏览器自动化框架，采用分层架构设计，通过 CDP (Chrome DevTools Protocol) 控制浏览器。
@@ -193,74 +226,6 @@ def my_tool(param: str) -> ActionResult:
 ```python
 browser = Browser(use_cloud=True)
 ```
-
-## API入手分析
-
-
-### 1. 入口点深度解析 (`Agent` 类)
-
-当你在代码中运行 `agent.run()` 时，项目的执行引擎正式启动。
-
-#### **初始化阶段 (`Agent.__init__`)**
-- **LLM 设置**: 默认推荐 `ChatBrowserUse`，也会根据模型名称（如 Claude Sonnet）自动优化截图尺寸。
-- **BrowserSession 绑定**: 如果未提供，会自动创建一个基于 `cdp-use` 的 `BrowserSession`。
-- **MessageManager 初始化**: 这是 Agent 的"大脑存储"，它加载 `SystemPrompt`（系统提示词），包含 LLM 需要遵循的所有规则和可用的 `Tools` 列表。
-- **ActionModels 设置**: 自动根据 `Tools` 注册表生成 Pydantic 模型，用于约束 LLM 的结构化输出。
-
----
-
-### 2. 核心执行循环 (`Agent.run`)
-
-`run` 方法是整个任务的生命周期管理器：
-
-1. **信号处理**: 注册 `SignalHandler`，捕获 `Ctrl+C` 以实现优雅停机或暂停。
-2. **事件发布**: 通过 `EventBus` 发布 `CreateAgentTaskEvent`，允许外部监控任务状态。
-3. **主步进循环**:
-   - 调用 `_execute_step()`，这实际上是一个 `asyncio.wait_for` 包装器，受 `step_timeout` 限制。
-   - 循环执行直到满足结束条件（LLM 发出 `done` 动作、达到 `max_steps` 或发生不可恢复错误）。
-
----
-
-### 3. 单步执行深度解析 (`Agent.step`)
-
-这是项目最核心的代码位置，定义了 AI 如何与浏览器交互：
-
-#### **第一阶段：准备上下文 (`_prepare_context`)**
-- **状态快照**: 调用 `browser_session.get_browser_state_summary()`。
-  - **DOM 转换**: `DomService` 将复杂的 HTML 转化为精简的 `EnhancedDOMTreeNode` 树。
-  - **截图**: 即使不开启视觉模式，也会捕获截图用于调试。
-- **动作空间更新**: 根据当前 URL 动态更新可用的工具（某些工具可能只在特定域名可用）。
-- **消息构建**: `MessageManager` 将当前 DOM 状态、截图、历史记录和错误信息拼接成 LLM 的输入。
-
-#### **第二阶段：获取决策 (`_get_next_action`)**
-- **LLM 调用**: 调用 `self.llm.ainvoke`。
-- **结构化解析**: 强制 LLM 返回 `AgentOutput` 格式，包含 `thinking`（思考过程）和 `action`（动作列表）。
-- **Fallback 机制**: 如果主 LLM 发生 429（限流）或 5xx 错误，会自动切换到备份 LLM（如果已配置）。
-
-#### **第三阶段：动作执行 (`_execute_actions` -> `multi_act`)**
-- **工具分发**: 遍历动作列表，通过 `Tools` 注册表找到对应的处理函数。
-- **底层操作**:
-  - `click` -> `Element.click()` -> `CDP.Input.dispatchMouseEvent`。
-  - `input` -> `Element.type()` -> `CDP.Input.dispatchKeyEvent`。
-- **结果捕获**: 每个动作返回 `ActionResult`，包含执行结果或错误。
-
-#### **第四阶段：收尾与评估 (`_finalize`)**
-- **历史归档**: 将动作、结果和新的状态存入 `AgentHistory`。
-- **Judge 评估**: 如果开启了 `use_judge`，在 `done` 动作发出后，会另起一个 LLM 调用来客观评估任务是否真的按要求完成了。
-
----
-
-### 4. 关键代码位置备忘 (Quick Reference)
-
-逻辑环节 | 文件路径 | 关键函数/类 |
-:--- | :--- | :--- |
-**任务循环入口** | `browser_use/agent/service.py` | `Agent.run()` |
-**AI 决策逻辑** | `browser_use/agent/service.py` | `Agent.step()` |
-**DOM 简化算法** | `browser_use/dom/service.py` | `DomService.get_dom_tree()` |
-**元素点击/输入** | `browser_use/actor/element.py` | `Element.click()`, `Element.type()` |
-**提示词生成** | `browser_use/agent/prompts.py` | `SystemPrompt.get_system_message()` |
-**工具定义** | `browser_use/tools/service.py` | `@tools.action` 装饰的各种函数 |
-**浏览器驱动** | `browser_use/browser/session.py` | `BrowserSession` (CDP 封装) |
 
 ## 数据流转
 
