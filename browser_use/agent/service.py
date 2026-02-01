@@ -2605,27 +2605,38 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		ai_step_llm: BaseChatModel | None = None,
 	) -> ActionResult:
 		"""
-		Execute an AI step during rerun to re-evaluate extract actions.
-		Analyzes full page DOM/markdown + optional screenshot.
+		【AI核心】在历史回放中重新执行 extract 动作，使用AI重新分析页面内容
+		
+		场景说明：
+		在 rerun_history 中，extract 动作不能简单地重用历史结果，因为：
+		1. 页面内容可能已变化（如动态数据更新）
+		2. 需要确保提取的是当前页面的最新信息
+		因此，需要重新调用 LLM 分析当前页面。
+
+		工作流程：
+		1. 提取当前页面的 主要 内容
+		2. （可选）获取当前页面截图
+		3. 构建 AI 分析提示词（包含内容统计信息）
+		4. 调用 LLM 执行分析
+		5. 处理并返回结果
 
 		Args:
-			query: What to analyze or extract from the current page
-			include_screenshot: Whether to include screenshot in analysis
-			extract_links: Whether to include links in markdown extraction
-			ai_step_llm: Optional LLM to use. If not provided, uses agent's LLM
-
-		Returns:
-			ActionResult with extracted content
+			query: 要分析或提取的内容描述
+			include_screenshot: 是否在分析中包含截图
+			extract_links: 是否在 markdown 提取中包含链接
+			ai_step_llm: 可选的专用 LLM（默认使用 Agent 的 LLM）
 		"""
 		from browser_use.agent.prompts import get_ai_step_system_prompt, get_ai_step_user_prompt, get_rerun_summary_message
 		from browser_use.llm.messages import SystemMessage, UserMessage
 		from browser_use.utils import sanitize_surrogates
 
-		# Use provided LLM or agent's LLM
+		# ==================== 1. 确定使用的 LLM ====================
+		# 优先使用传入的专用 LLM，否则使用 Agent 的默认 LLM
 		llm = ai_step_llm or self.llm
 		self.logger.debug(f'Using LLM for AI step: {llm.model}')
 
-		# Extract clean markdown
+		# ==================== 2. 提取页面 Markdown 内容 ====================
+		# 使用 DOM 提取器获取干净的 Markdown，便于 LLM 分析
 		try:
 			from browser_use.dom.markdown_extractor import extract_clean_markdown
 
@@ -2635,7 +2646,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		except Exception as e:
 			return ActionResult(error=f'Could not extract clean markdown: {type(e).__name__}: {e}')
 
-		# Get screenshot if requested
+		# ==================== 3. （可选）获取页面截图 ====================
+		# 如果需要视觉上下文，则获取当前视口的截图
 		screenshot_b64 = None
 		if include_screenshot:
 			try:
@@ -2647,7 +2659,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			except Exception as e:
 				self.logger.warning(f'Failed to capture screenshot for ai_step: {e}')
 
-		# Build prompt with content stats
+		# ==================== 4. 构建内容统计信息 ====================
+		# 记录内容处理过程，帮助 LLM 理解内容质量
 		original_html_length = content_stats['original_html_chars']
 		initial_markdown_length = content_stats['initial_markdown_chars']
 		final_filtered_length = content_stats['final_filtered_chars']
@@ -2657,36 +2670,44 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if chars_filtered > 0:
 			stats_summary += f' (filtered {chars_filtered:,} chars of noise)'
 
-		# Sanitize content
+		# ==================== 5. 数据清洗 ====================
+		# 清理可能的代理字符，确保文本安全
 		content = sanitize_surrogates(content)
 		query = sanitize_surrogates(query)
 
-		# Get prompts from prompts.py
+		# ==================== 6. 构建 AI 提示词 ====================
+		# 从 prompts.py 获取系统提示词和用户提示词模板
 		system_prompt = get_ai_step_system_prompt()
 		prompt_text = get_ai_step_user_prompt(query, stats_summary, content)
 
-		# Build user message with optional screenshot
+		# 构建最终的用户消息（可包含截图）
 		if screenshot_b64:
 			user_message = get_rerun_summary_message(prompt_text, screenshot_b64)
 		else:
 			user_message = UserMessage(content=prompt_text)
 
+		# ==================== 7. 调用 LLM 执行分析 ====================
 		try:
 			import asyncio
 
+			# 设置 120 秒超时，防止长时间阻塞
 			response = await asyncio.wait_for(llm.ainvoke([SystemMessage(content=system_prompt), user_message]), timeout=120.0)
 
+			# ==================== 8. 处理并返回结果 ====================
+			# 获取当前页面 URL，与提取结果一起返回
 			current_url = await self.browser_session.get_current_page_url()
 			extracted_content = (
 				f'<url>\n{current_url}\n</url>\n<query>\n{query}\n</query>\n<result>\n{response.completion}\n</result>'
 			)
 
-			# Simple memory handling
+			# 简单内存管理：避免 ActionResult 过大
 			MAX_MEMORY_LENGTH = 1000
 			if len(extracted_content) < MAX_MEMORY_LENGTH:
+				# 内容较短，直接存储在内存中
 				memory = extracted_content
 				include_extracted_content_only_once = False
 			else:
+				# 内容较长，保存到文件并只在内存中保留引用
 				file_name = await self.file_system.save_extracted_content(extracted_content)
 				memory = f'Query: {query}\nContent in {file_name} and once in <read_state>.'
 				include_extracted_content_only_once = True
@@ -2714,48 +2735,54 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		wait_for_elements: bool = False,
 	) -> list[ActionResult]:
 		"""
-		Rerun a saved history of actions with error handling and retry logic.
+		【核心方法】重放保存的历史动作记录，实现无LLM调用的任务重复执行
+		
+		工作原理：
+		1. 加载历史记录中保存的动作序列
+		2. 对每个动作：通过元素匹配算法找到当前页面对应的元素
+		3. 更新动作中的元素索引后执行
+		4. 最终生成AI总结报告
 
 		Args:
-		                history: The history to replay
-		                max_retries: Maximum number of retries per action
-		                skip_failures: Whether to skip failed actions or stop execution. When True, also skips
-		                               steps that had errors in the original run (e.g., modal close buttons that
-		                               auto-dismissed, or elements that became non-interactable)
-		                delay_between_actions: Delay between actions in seconds (used when no saved interval)
-		                max_step_interval: Maximum delay from saved step_interval (caps LLM time from original run)
-		                summary_llm: Optional LLM to use for generating the final summary. If not provided, uses the agent's LLM
-		                ai_step_llm: Optional LLM to use for AI steps (extract actions). If not provided, uses the agent's LLM
-		                wait_for_elements: If True, wait for minimum number of elements before attempting element
-		                               matching. Useful for SPA pages where shadow DOM content loads dynamically.
-		                               Default is False.
+		    history: 要重放的历史记录对象
+		    max_retries: 每个动作的最大重试次数
+		    skip_failures: 是否跳过失败的步骤继续执行
+		    delay_between_actions: 动作间延迟秒数（当历史记录无保存间隔时使用）
+		    max_step_interval: 步骤间隔最大值（用于限制原始LLM调用时间）
+		    summary_llm: 用于生成最终总结的可选LLM
+		    ai_step_llm: 用于extract等AI步骤的可选LLM
+		    wait_for_elements: 是否等待元素加载完成（用于SPA页面）
 
 		Returns:
-		                List of action results (including AI summary as the final result)
+		    动作结果列表（包含AI总结作为最后一项）
 		"""
-		# Skip cloud sync session events for rerunning (we're replaying, not starting new)
+		# ==================== 初始化阶段 ====================
+		# 跳过云同步会话事件（因为是重放，不是新会话）
 		self.state.session_initialized = True
 
-		# Initialize browser session
+		# 启动浏览器会话
 		await self.browser_session.start()
 
-		results = []
+		results = []  # 存储所有动作的执行结果
 
-		# Track previous step for redundant retry detection
-		previous_item: AgentHistory | None = None
-		previous_step_succeeded: bool = False
+		# 用于检测冗余重试的状态跟踪
+		previous_item: AgentHistory | None = None  # 上一个步骤
+		previous_step_succeeded: bool = False  # 上一步是否成功
 
 		try:
+			# ==================== 主循环：遍历历史记录中的每个步骤 ====================
 			for i, history_item in enumerate(history.history):
+				# 获取当前步骤的目标描述（用于日志）
 				goal = history_item.model_output.current_state.next_goal if history_item.model_output else ''
 				step_num = history_item.metadata.step_number if history_item.metadata else i
 				step_name = 'Initial actions' if step_num == 0 else f'Step {step_num}'
 
-				# Determine step delay
+				# -------------------- 计算步骤延迟 --------------------
+				# 优先使用历史记录中保存的步骤间隔（包含原始LLM调用时间）
 				if history_item.metadata and history_item.metadata.step_interval is not None:
-					# Cap the saved interval to max_step_interval (saved interval includes LLM time)
+					# 将保存的间隔限制在max_step_interval以内（避免等待原始LLM时间）
 					step_delay = min(history_item.metadata.step_interval, max_step_interval)
-					# Format delay nicely - show ms for values < 1s, otherwise show seconds
+					# 格式化延迟显示
 					if step_delay < 1.0:
 						delay_str = f'{step_delay * 1000:.0f}ms'
 					else:
@@ -2765,6 +2792,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					else:
 						delay_source = f'using saved step_interval={delay_str}'
 				else:
+					# 无保存间隔时使用默认延迟
 					step_delay = delay_between_actions
 					if step_delay < 1.0:
 						delay_str = f'{step_delay * 1000:.0f}ms'
@@ -2774,6 +2802,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 				self.logger.info(f'Replaying {step_name} ({i + 1}/{len(history.history)}) [{delay_source}]: {goal}')
 
+				# -------------------- 跳过无效步骤 --------------------
 				if (
 					not history_item.model_output
 					or not history_item.model_output.action
@@ -2783,7 +2812,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					results.append(ActionResult(error='No action to replay'))
 					continue
 
-				# Check if the original step had errors - skip if skip_failures is enabled
+				# -------------------- 跳过原始运行中失败的步骤 --------------------
+				# 如果启用了skip_failures，跳过原始记录中就有错误的步骤
+				# （如自动消失的模态框关闭按钮等）
 				original_had_error = any(r.error for r in history_item.result if r.error)
 				if original_had_error and skip_failures:
 					error_msgs = [r.error for r in history_item.result if r.error]
@@ -2797,9 +2828,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					)
 					continue
 
-				# Check if this step is a redundant retry of the previous step
-				# This handles cases where original run needed to click same element multiple times
-				# due to slow page response, but during replay the first click already worked
+				# -------------------- 检测并跳过冗余重试步骤 --------------------
+				# 处理这种情况：原始运行中因页面响应慢而多次点击同一元素
+				# 但在重放时第一次点击已成功，后续点击就是冗余的
 				if self._is_redundant_retry_step(history_item, previous_item, previous_step_succeeded):
 					self.logger.info(f'{step_name}: Skipping redundant retry (previous step already succeeded with same element)')
 					results.append(
@@ -2808,79 +2839,83 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 							include_in_memory=False,
 						)
 					)
-					# Don't update previous_item/previous_step_succeeded - keep tracking the original step
+					# 不更新previous_item/previous_step_succeeded，保持跟踪原始步骤
 					continue
 
+				# ==================== 重试循环：执行单个步骤 ====================
 				retry_count = 0
 				step_succeeded = False
-				menu_reopened = False  # Track if we've already tried reopening the menu
-				# Exponential backoff: 5s base, doubling each retry, capped at 30s
+				menu_reopened = False  # 标记是否已尝试重新打开菜单
+				# 指数退避配置：基础5秒，每次翻倍，最大30秒
 				base_retry_delay = 5.0
 				max_retry_delay = 30.0
+				
 				while retry_count < max_retries:
 					try:
+						# 【核心】执行历史步骤（包含元素匹配和动作执行）
 						result = await self._execute_history_step(history_item, step_delay, ai_step_llm, wait_for_elements)
 						results.extend(result)
 						step_succeeded = True
-						break
+						break  # 成功则退出重试循环
 
 					except Exception as e:
 						error_str = str(e)
 						retry_count += 1
 
-						# Check if this is a "Could not find matching element" error for a menu item
-						# If so, try to re-open the dropdown from the previous step before retrying
+						# -------------------- 特殊处理：菜单项找不到时重新打开菜单 --------------------
+						# 场景：下拉菜单在等待期间自动关闭
 						if (
-							not menu_reopened
-							and 'Could not find matching element' in error_str
-							and previous_item is not None
-							and self._is_menu_opener_step(previous_item)
+							not menu_reopened  # 尚未尝试重开
+							and 'Could not find matching element' in error_str  # 找不到元素
+							and previous_item is not None  # 有前一步
+							and self._is_menu_opener_step(previous_item)  # 前一步是打开菜单
 						):
-							# Check if current step targets a menu item element
+							# 检查当前步骤是否针对菜单项
 							curr_elements = history_item.state.interacted_element if history_item.state else []
 							curr_elem = curr_elements[0] if curr_elements else None
 							if self._is_menu_item_element(curr_elem):
 								self.logger.info(
 									'🔄 Dropdown may have closed. Attempting to re-open by re-executing previous step...'
 								)
+								# 重新执行打开菜单的步骤
 								reopened = await self._reexecute_menu_opener(previous_item, ai_step_llm)
 								if reopened:
 									menu_reopened = True
-									# Don't increment retry_count for the menu reopen attempt
-									# Retry immediately with minimal delay
+									# 不增加retry_count（重开菜单不算重试次数）
 									retry_count -= 1
-									step_delay = 0.5  # Use short delay after reopening
+									step_delay = 0.5  # 重开后用短延迟
 									self.logger.info('🔄 Dropdown re-opened, retrying element match...')
 									continue
 
+						# -------------------- 达到最大重试次数 --------------------
 						if retry_count == max_retries:
 							error_msg = f'{step_name} failed after {max_retries} attempts: {error_str}'
 							self.logger.error(error_msg)
-							# Always record the error in results so AI summary counts it correctly
+							# 记录错误到结果（用于AI总结统计）
 							results.append(ActionResult(error=error_msg))
 							if not skip_failures:
-								raise RuntimeError(error_msg)
-							# With skip_failures=True, continue to next step
+								raise RuntimeError(error_msg)  # 不跳过失败时抛出异常
+							# skip_failures=True时继续下一步
 						else:
-							# Exponential backoff: 5s, 10s, 20s, ... capped at 30s
+							# -------------------- 指数退避等待 --------------------
 							retry_delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
 							self.logger.warning(
 								f'{step_name} failed (attempt {retry_count}/{max_retries}), retrying in {retry_delay}s...'
 							)
 							await asyncio.sleep(retry_delay)
 
-				# Update tracking for redundant retry detection
+				# 更新冗余重试检测的跟踪状态
 				previous_item = history_item
 				previous_step_succeeded = step_succeeded
 
-			# Generate AI summary of rerun completion
+			# ==================== 生成AI总结 ====================
 			self.logger.info('🤖 Generating AI summary of rerun completion...')
 			summary_result = await self._generate_rerun_summary(self.task, results, summary_llm)
 			results.append(summary_result)
 
 			return results
 		finally:
-			# Always close resources, even on failure
+			# 确保资源释放（即使发生异常）
 			await self.close()
 
 	async def _execute_initial_actions(self) -> None:
@@ -3004,29 +3039,34 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		ai_step_llm: BaseChatModel | None = None,
 		wait_for_elements: bool = False,
 	) -> list[ActionResult]:
-		"""Execute a single step from history with element validation.
-
-		For extract actions, uses AI to re-evaluate the content since page content may have changed.
+		"""
+		【核心方法】执行单个历史步骤，包含智能元素匹配和动作执行
+		
+		对于 extract 动作：使用 AI 重新评估内容（因为页面内容可能已变化）
+		对于其他动作：更新元素索引并执行
 
 		Args:
-			history_item: The history step to execute
-			delay: Delay before executing the step
-			ai_step_llm: Optional LLM to use for AI steps
-			wait_for_elements: If True, wait for minimum elements before element matching
+			history_item: 要执行的历史步骤
+			delay: 执行前的延迟时间
+			ai_step_llm: 用于AI步骤的可选LLM
+			wait_for_elements: 是否等待元素加载
 		"""
 		assert self.browser_session is not None, 'BrowserSession is not set up'
 
 		await asyncio.sleep(delay)
 
-		# Optionally wait for minimum elements before element matching (useful for SPAs)
+		# ==================== 智能等待（针对SPA页面） ====================
+		# 对于单页应用(SPA)，页面内容可能通过 JavaScript 动态加载
+		# 此处等待确保元素已渲染完成后再进行匹配
 		if wait_for_elements:
-			# Determine if we need to wait for elements (actions that interact with DOM elements)
+			# 判断是否需要等待元素（只有涉及DOM交互的动作才需要）
 			needs_element_matching = False
 			if history_item.model_output:
 				for i, action in enumerate(history_item.model_output.action):
+					# 将action对象转换为字典，排除未设置的字段（只保留有值的字段）
 					action_data = action.model_dump(exclude_unset=True)
 					action_name = next(iter(action_data.keys()), None)
-					# Actions that need element matching
+					# 需要元素匹配的动作列表：click, input, hover, select_option, drag_and_drop
 					if action_name in ('click', 'input', 'hover', 'select_option', 'drag_and_drop'):
 						historical_elem = (
 							history_item.state.interacted_element[i] if i < len(history_item.state.interacted_element) else None
@@ -3035,7 +3075,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 							needs_element_matching = True
 							break
 
-			# If we need element matching, wait for minimum elements before proceeding
+			# 如果需要匹配，则等待页面出现足够数量的元素
 			if needs_element_matching:
 				min_elements = self._count_expected_elements_from_history(history_item)
 				if min_elements > 0:
@@ -3051,21 +3091,24 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		results = []
 		pending_actions = []
-
+		# 遍历历史记录中的动作列表，对 extract 动作直接调用 AI 进行信息提取，
 		for i, action in enumerate(history_item.model_output.action):
+			# 将action对象转为字典（仅保留有值字段）
 			# Check if this is an extract action - use AI step instead
 			action_data = action.model_dump(exclude_unset=True)
+			# 获取动作名称（如extract/click/input）
 			action_name = next(iter(action_data.keys()), None)
-
+		    # 处理 extract 动作（AI 提取逻辑）
 			if action_name == 'extract':
 				# Execute any pending actions first to maintain correct order
 				# (e.g., if step is [click, extract], click must happen before extract)
+				# 1. 先执行已收集的pending动作（保证执行顺序，比如先click再extract）
 				if pending_actions:
 					batch_results = await self.multi_act(pending_actions)
 					results.extend(batch_results)
 					pending_actions = []
 
-				# Now execute AI step for extract action
+				# 2. 提取extract动作的参数
 				extract_params = action_data['extract']
 				query = extract_params.get('query', '')
 				extract_links = extract_params.get('extract_links', False)
@@ -3078,21 +3121,27 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					ai_step_llm=ai_step_llm,
 				)
 				results.append(ai_result)
+			# 处理非 extract 动作（批量执行逻辑）
 			else:
 				# For non-extract actions, update indices and collect for batch execution
+				# 1. 获取当前动作对应的历史交互元素（state.interacted_element是个数组，每一项对应每个action动作操作的元素信息）
 				historical_elem = history_item.state.interacted_element[i]
+				# 2. 更新动作的元素索引（适配当前页面的DOM结构）
 				updated_action = await self._update_action_indices(
 					historical_elem,
 					action,
 					state,
 				)
+				# 3. 处理元素匹配失败的情况（核心异常逻辑）
 				if updated_action is None:
 					# Build informative error message with diagnostic info
+					# 构建详细的错误诊断信息
 					elem_info = self._format_element_for_error(historical_elem)
 					selector_map = state.dom_state.selector_map or {}
 					selector_count = len(selector_map)
 
 					# Find elements with same node_name for diagnostics
+					# 查找同类型的元素（用于诊断）
 					hist_node = historical_elem.node_name.lower() if historical_elem else ''
 					similar_elements = []
 					if historical_elem and historical_elem.attributes:
@@ -3106,6 +3155,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 										break
 
 					diagnostic = ''
+					# 拼接诊断信息
 					if similar_elements:
 						diagnostic = f'\n  Available <{hist_node.upper()}> with aria-label: {similar_elements}'
 					elif hist_node:
@@ -3113,16 +3163,18 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 						diagnostic = (
 							f'\n  Found {same_node_count} <{hist_node.upper()}> elements (none with matching identifiers)'
 						)
-
+					# 抛出详细的异常信息
 					raise ValueError(
 						f'Could not find matching element for action {i} in current page.\n'
 						f'  Looking for: {elem_info}\n'
 						f'  Page has {selector_count} interactive elements.{diagnostic}\n'
 						f'  Tried: EXACT hash → STABLE hash → XPATH → AX_NAME → ATTRIBUTE matching'
 					)
+				# 4. 元素匹配成功，将更新后的动作加入pending列表（批量执行）
 				pending_actions.append(updated_action)
 
 		# Execute any remaining pending actions
+		# 遍历结束后，执行所有剩余的pending动作
 		if pending_actions:
 			batch_results = await self.multi_act(pending_actions)
 			results.extend(batch_results)
@@ -3132,19 +3184,32 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	async def _update_action_indices(
 		self,
 		historical_element: DOMInteractedElement | None,
-		action: ActionModel,  # Type this properly based on your action model
+		action: ActionModel,
 		browser_state_summary: BrowserStateSummary,
 	) -> ActionModel | None:
 		"""
-		Update action indices based on current page state.
-		Returns updated action or None if element cannot be found.
+		主要功能：智能元素重定位
+		- 它的作用是在回放历史操作时，在新的页面状态中重新找到以前操作过的那个元素。
+		- 因为网页是动态的，当你重新运行一个任务时，页面上的元素索引（index）、属性或样式可能已经发生了微小的变化。如果直接使用旧的索引，可能会找不到元素或点错。这个函数通过一套 五级级联匹配策略 来“认出”那个元素：
 
-		Cascading matching strategy (tries each level in order):
-		1. EXACT: Full element_hash match (includes all attributes + ax_name)
-		2. STABLE: Hash with dynamic CSS classes filtered out (focus, hover, animation, etc.)
-		3. XPATH: XPath string match (structural position in DOM)
-		4. AX_NAME: Accessible name match from accessibility tree (robust for dynamic menus)
-		5. ATTRIBUTE: Unique attribute match (name, id, aria-label) for old history files
+		【核心算法】更新动作索引，使其适配当前页面状态
+		返回更新后的动作，如果找不到元素则返回 None
+
+		五级级联匹配策略（按优先级顺序尝试）：
+		┌─────────┬──────────────────────────────────────────────────────────┐
+		│ Level 1 │ EXACT: 完全哈希匹配（包含所有属性 + ax_name）             │
+		│ Level 2 │ STABLE: 稳定哈希匹配（过滤 focus, hover 等动态 CSS 类）   │
+		│ Level 3 │ XPATH: XPath 结构匹配（基于 DOM 结构位置）                │
+		│ Level 4 │ AX_NAME: 可访问名称匹配（对动态菜单特别有效）             │
+		│ Level 5 │ ATTRIBUTE: 唯一属性匹配（name, id, aria-label）           │
+		└─────────┴──────────────────────────────────────────────────────────┘
+		
+		设计原理：
+		- EXACT: 最精确，但对任何属性变化敏感
+		- STABLE: 容忍 CSS 状态类变化（如 :hover, :focus）
+		- XPATH: 容忍属性变化，但对 DOM 结构变化敏感
+		- AX_NAME: 对动态生成的菜单项特别有效（可访问性树稳定）
+		- ATTRIBUTE: 兼容旧版历史文件，作为最后手段
 		"""
 		if not historical_element or not browser_state_summary.dom_state.selector_map:
 			return action
@@ -3153,12 +3218,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		highlight_index: int | None = None
 		match_level: MatchLevel | None = None
 
-		# Debug: log what we're looking for and what's available
+		# 调试日志：记录目标元素和当前页面可用元素
 		self.logger.info(
 			f'🔍 Searching for element: <{historical_element.node_name}> '
 			f'hash={historical_element.element_hash} stable_hash={historical_element.stable_hash}'
 		)
-		# Log what elements are in selector_map for debugging
 		if historical_element.node_name:
 			hist_name = historical_element.node_name.lower()
 			matching_nodes = [
@@ -3171,7 +3235,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				f'{len(matching_nodes)} are <{hist_name.upper()}>: {matching_nodes}'
 			)
 
-		# Level 1: EXACT hash match
+		# ==================== Level 1: EXACT 完全哈希匹配 ====================
+		# 最精确的匹配：要求元素的所有属性（包括 class）完全一致
 		for idx, elem in selector_map.items():
 			if elem.element_hash == historical_element.element_hash:
 				highlight_index = idx
@@ -3181,8 +3246,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if highlight_index is None:
 			self.logger.debug(f'EXACT hash match failed (checked {len(selector_map)} elements)')
 
-		# Level 2: STABLE hash match (dynamic classes filtered)
-		# Use stored stable_hash (computed at save time from EnhancedDOMTreeNode - single source of truth)
+		# ==================== Level 2: STABLE 稳定哈希匹配 ====================
+		# 过滤动态 CSS 类后进行匹配
+		# 被过滤的类包括：focus, hover, active, selected, expanded, animation 相关类等
+		# 使用保存时计算的 stable_hash（单一事实来源）
 		if highlight_index is None and historical_element.stable_hash is not None:
 			for idx, elem in selector_map.items():
 				if elem.compute_stable_hash() == historical_element.stable_hash:
@@ -3195,7 +3262,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		elif highlight_index is None:
 			self.logger.debug('STABLE hash match skipped (no stable_hash in history)')
 
-		# Level 3: XPATH match
+		# ==================== Level 3: XPATH 匹配 ====================
+		# 基于 DOM 树结构位置匹配
+		# 优点：不依赖属性值，对属性变化鲁棒
+		# 缺点：DOM 结构变化时会失效（如动态插入/删除元素）
 		if highlight_index is None and historical_element.x_path:
 			for idx, elem in selector_map.items():
 				if elem.xpath == historical_element.x_path:
@@ -3206,14 +3276,17 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			if highlight_index is None:
 				self.logger.debug(f'XPATH match failed for: {historical_element.x_path[-60:]}')
 
-		# Level 4: ax_name (accessible name) match - robust for dynamic SPAs with menus
-		# This uses the accessible name from the accessibility tree which is stable
-		# even when DOM structure changes (e.g., dynamically generated menu items)
+		# ==================== Level 4: AX_NAME 可访问名称匹配 ====================
+		# 使用可访问性树(Accessibility Tree)中的名称进行匹配
+		# 特点：
+		# - 对动态 SPA 和菜单特别有效
+		# - 即使 DOM 结构变化（如动态生成的菜单项），可访问名称通常保持稳定
+		# - 例如：下拉菜单展开后重新渲染，但按钮的 aria-label 不变
 		if highlight_index is None and historical_element.ax_name:
 			hist_name = historical_element.node_name.lower()
 			hist_ax_name = historical_element.ax_name
 			for idx, elem in selector_map.items():
-				# Match by node type and accessible name
+				# 同时匹配节点类型和可访问名称
 				elem_ax_name = elem.ax_node.name if elem.ax_node else None
 				if elem.node_name.lower() == hist_name and elem_ax_name == hist_ax_name:
 					highlight_index = idx
@@ -3221,7 +3294,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					self.logger.info(f'Element matched at AX_NAME level: "{hist_ax_name}"')
 					break
 			if highlight_index is None:
-				# Log available ax_names for debugging
+				# 记录调试信息：显示页面上同类型元素的可访问名称
 				same_type_ax_names = [
 					(idx, elem.ax_node.name if elem.ax_node else None)
 					for idx, elem in selector_map.items()
@@ -3233,12 +3306,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					f'{same_type_ax_names[:5]}{"..." if len(same_type_ax_names) > 5 else ""}'
 				)
 
-		# Level 5: Unique attribute fallback (for old history files without stable_hash)
+		# ==================== Level 5: ATTRIBUTE 唯一属性回退匹配 ====================
+		# 为兼容旧版历史文件（没有 stable_hash）设计
+		# 尝试使用唯一标识符进行匹配：name, id, aria-label
 		if highlight_index is None and historical_element.attributes:
 			hist_attrs = historical_element.attributes
 			hist_name = historical_element.node_name.lower()
 
-			# Try matching by unique identifiers: name, id, or aria-label
+			# 按优先级尝试匹配
 			for attr_key in ['name', 'id', 'aria-label']:
 				if attr_key in hist_attrs and hist_attrs[attr_key]:
 					for idx, elem in selector_map.items():
@@ -3256,7 +3331,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			if highlight_index is None:
 				tried_attrs = [k for k in ['name', 'id', 'aria-label'] if k in hist_attrs and hist_attrs[k]]
-				# Log what was tried and what's available on the page for debugging
 				same_node_elements = [
 					(idx, elem.attributes.get('aria-label') or elem.attributes.get('id') or elem.attributes.get('name'))
 					for idx, elem in selector_map.items()
@@ -3269,9 +3343,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					f'{same_node_elements[:5]}{"..." if len(same_node_elements) > 5 else ""}'
 				)
 
+		# 所有级别都匹配失败
 		if highlight_index is None:
 			return None
 
+		# 更新动作中的元素索引
 		old_index = action.get_index()
 		if old_index != highlight_index:
 			action.set_index(highlight_index)
@@ -3281,7 +3357,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		return action
 
 	def _format_element_for_error(self, elem: DOMInteractedElement | None) -> str:
-		"""Format element info for error messages during history rerun."""
+		"""格式化元素信息用于错误消息"""
 		if elem is None:
 			return '<no element recorded>'
 
@@ -3312,17 +3388,18 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		previous_step_succeeded: bool,
 	) -> bool:
 		"""
-		Detect if current step is a redundant retry of the previous step.
+		【优化】检测当前步骤是否为不必要的冗余重试
+		
+		场景说明：
+		在原始执行中，Agent 可能因为页面响应慢多次点击同一按钮（重试）。
+		但在回放时，第一次点击可能已经成功触发了页面跳转/变化。
+		此时，后续对同一元素的重试点击会导致"元素找不到"错误（因为页面变了）。
+		此方法用于识别并跳过这些多余的重试。
 
-		This handles cases where the original run needed to click the same element multiple
-		times due to slow page response, but during replay the first click already succeeded.
-		When the page has already navigated, subsequent retry clicks on the same element
-		would fail because that element no longer exists.
-
-		Returns True if:
-		- Previous step succeeded
-		- Both steps target the same element (by element_hash, stable_hash, or xpath)
-		- Both steps perform the same action type (e.g., both are clicks)
+		判断标准（同时满足）：
+		1. 上一步骤执行成功
+		2. 两个步骤操作的是同一个元素（通过 hash/stable_hash/xpath 判断）
+		3. 两个步骤执行的是同一种动作（如都是 click）
 		"""
 		if not previous_item or not previous_step_succeeded:
 			return False
@@ -3378,15 +3455,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 	def _is_menu_opener_step(self, history_item: AgentHistory | None) -> bool:
 		"""
-		Detect if a step opens a dropdown/menu.
-
-		Checks for common patterns indicating a menu opener:
-		- Element has aria-haspopup attribute
-		- Element has data-gw-click="toggleSubMenu" (Guidewire pattern)
-		- Element has expand-button in class name
-		- Element role is "menuitem" with aria-expanded
-
-		Returns True if the step appears to open a dropdown/submenu.
+		【识别】检测步骤是否为"打开菜单"的操作
+		
+		通过以下特征识别菜单开启器：
+		1. 元素具有 aria-haspopup 属性 (menu, listbox 等)
+		2. 具有特定的 data-gw-click="toggleSubMenu" 属性 (Guidewire 应用模式)
+		3. class 包含 'expand-button'
+		4. 角色是 menuitem 且具有 aria-expanded 状态
 		"""
 		if not history_item or not history_item.state or not history_item.state.interacted_element:
 			return False
@@ -3413,14 +3488,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 	def _is_menu_item_element(self, elem: 'DOMInteractedElement | None') -> bool:
 		"""
-		Detect if an element is a menu item that appears inside a dropdown/menu.
-
-		Checks for:
-		- role="menuitem", "option", "menuitemcheckbox", "menuitemradio"
-		- Element is inside a menu structure (has menu-related parent indicators)
-		- ax_name is set (menu items typically have accessible names)
-
-		Returns True if the element appears to be a menu item.
+		【识别】检测元素是否为菜单项
+		
+		用于判断是否需要尝试菜单恢复逻辑。检查：
+		1. 角色 (role): menuitem, option 等
+		2. DOM 结构特征：包含在 menu/popup/dropdown 等容器中
+		3. 具有可访问名称 (ax_name)
 		"""
 		if not elem:
 			return False
@@ -3454,18 +3527,16 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		ai_step_llm: 'BaseChatModel | None' = None,
 	) -> bool:
 		"""
-		Re-execute a menu opener step to re-open a closed dropdown.
-
-		This is used when a menu item can't be found because the dropdown
-		closed during the wait between steps.
-
-		Returns True if re-execution succeeded, False otherwise.
+		【容错执行】重新执行菜单打开操作
+		
+		当找不到菜单项元素时调用。通过重新点击打开菜单的按钮，
+		试图恢复意外关闭的下拉菜单状态。
 		"""
 		try:
 			self.logger.info('🔄 Re-opening dropdown/menu by re-executing previous step...')
-			# Use a minimal delay - we want to quickly re-open the menu
+			# 使用极短的延迟（0.5s），目标是快速恢复菜单
 			await self._execute_history_step(opener_item, delay=0.5, ai_step_llm=ai_step_llm, wait_for_elements=False)
-			# Small delay to let the menu render
+			# 给菜单一点渲染时间
 			await asyncio.sleep(0.3)
 			return True
 		except Exception as e:
@@ -3479,18 +3550,18 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		**kwargs,
 	) -> list[ActionResult]:
 		"""
-		Load history from file and rerun it, optionally substituting variables.
+		【入口方法】从文件加载历史记录并重新运行
 
+		支持变量替换：可以在历史记录中注入新的值（如新的用户名/密码）
+		
 		Args:
-			history_file: Path to the history file
-			variables: Optional dict mapping variable names to new values (e.g. {'email': 'new@example.com'})
-			**kwargs: Additional arguments passed to rerun_history:
-				- max_retries: Maximum retries per action (default: 3)
-				- skip_failures: Continue on failure (default: True)
-				- delay_between_actions: Delay when no saved interval (default: 2.0s)
-				- max_step_interval: Cap on saved step_interval (default: 45.0s)
-				- summary_llm: Custom LLM for final summary
-				- ai_step_llm: Custom LLM for extract re-evaluation
+			history_file: 历史记录文件路径 (默认: AgentHistory.json)
+			variables: 变量替换字典 (例如 {'email': 'new@example.com'})
+			**kwargs: 传递给 rerun_history 的参数:
+				- max_retries: 最大重试次数
+				- skip_failures: 是否跳过失败步骤
+				- delay_between_actions: 默认动作间隔
+				- max_step_interval: 最大等待时间上限
 		"""
 		if not history_file:
 			history_file = 'AgentHistory.json'

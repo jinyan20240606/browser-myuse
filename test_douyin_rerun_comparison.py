@@ -12,9 +12,10 @@ import asyncio
 import time
 from pathlib import Path
 from browser_use import Agent, Browser
-from browser_use.llm import ChatBrowserUse
+from browser_use.llm import ChatOpenAI
+import os
 
-
+MODEL_NAME = 'qiniu/claude-opus-4.5'
 class TokenTimeTracker:
     """追踪 token 消耗和时间的工具类"""
     
@@ -75,7 +76,11 @@ async def run_first_time(task: str, history_file: Path, reply_message: str = "�
     # 创建 Agent，启用 token 计算
     agent = Agent(
         task=task,
-        llm=ChatBrowserUse(),
+        llm=ChatOpenAI(
+            model=MODEL_NAME,
+            api_key=os.getenv('OPENAI_API_KEY'),
+            base_url=os.getenv('OPENAI_API_BASE')
+        ),
         calculate_cost=True,  # 启用 token 计算
         max_actions_per_step=3,
         headless=False,  # 显示浏览器窗口
@@ -113,7 +118,11 @@ async def run_rerun(history_file: Path, reply_message: str = "你好，这是一
     # 创建新的 Agent 用于重放
     agent = Agent(
         task="",  # 重放时不需要 task
-        llm=ChatBrowserUse(),
+        llm=ChatOpenAI(
+            model=MODEL_NAME,
+            api_key=os.getenv('OPENAI_API_KEY'),
+            base_url=os.getenv('OPENAI_API_BASE')
+        ),
         calculate_cost=True,  # 启用 token 计算
         headless=False,  # 显示浏览器窗口
     )
@@ -123,7 +132,7 @@ async def run_rerun(history_file: Path, reply_message: str = "你好，这是一
         history_file,
         max_step_interval=10,  # 限制步骤间最大等待时间
         delay_between_actions=1,  # 动作间延迟
-        skip_failures=False,  # 遇到错误停止
+        skip_failures=True,  # 跳过执行失败的错误
     )
     
     tracker.end()
@@ -166,12 +175,12 @@ def compare_results(first_tracker: TokenTimeTracker, rerun_tracker: TokenTimeTra
     print(f"   节省 Token: {tokens_saved:,} ({tokens_saved_percent:.1f}%)")
     
     print(f"\n💰 成本节省:")
-    # 假设 ChatBrowserUse 的价格（示例）
-    input_price = 0.000001  # 每千 token 的价格（示例）
-    output_price = 0.000002  # 每千 token 的价格（示例）
+    # 假设 GPT-4o-mini 的价格（示例）
+    input_price = 0.00015 / 1000  # 每 token 的价格 ($0.15/1M)
+    output_price = 0.00060 / 1000  # 每 token 的价格 ($0.60/1M)
     
-    first_cost = (first['input_tokens'] / 1000) * input_price + (first['output_tokens'] / 1000) * output_price
-    rerun_cost = (rerun['input_tokens'] / 1000) * input_price + (rerun['output_tokens'] / 1000) * output_price
+    first_cost = first['input_tokens'] * input_price + first['output_tokens'] * output_price
+    rerun_cost = rerun['input_tokens'] * input_price + rerun['output_tokens'] * output_price
     cost_saved = first_cost - rerun_cost
     
     print(f"   首次运行成本: ${first_cost:.4f}")
@@ -184,7 +193,7 @@ def compare_results(first_tracker: TokenTimeTracker, rerun_tracker: TokenTimeTra
 async def main():
     # 配置
     history_file = Path('douyin_history.json')
-    reply_message = "你好，这是一条测试消息"
+    reply_message = "你好，稍后回复您"
     
     # 任务描述
     task = f"""
@@ -194,10 +203,9 @@ async def main():
     3. 如果出现任何弹窗（如"我知道了"、"稍后"等），点击关闭
     4. 循环遍历联系人列表中的每个对话：
        a. 点击对话
-       b. 在输入框中输入: {reply_message}
+       b. 直接在输入框中输入: {reply_message}
        c. 点击发送按钮
-       d. 返回联系人列表（如果需要）
-       e. 继续下一个对话，直到所有对话都已处理
+       d. 继续下一个对话，直到所有对话都已处理
     
     注意：只处理前 3 个对话作为测试
     """

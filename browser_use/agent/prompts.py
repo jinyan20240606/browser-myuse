@@ -23,8 +23,14 @@ def _is_anthropic_4_5_model(model_name: str | None) -> bool:
 	is_haiku_4_5 = 'haiku' in model_lower and ('4.5' in model_lower or '4-5' in model_lower)
 	return is_opus_4_5 or is_haiku_4_5
 
-
 class SystemPrompt:
+	"""
+	用途：生成发送给 LLM 的系统消息（角色设定）
+
+	使用场景：Agent 初始化时，定义 LLM 的身份和行为准则
+
+	核心逻辑（_load_prompt_template()）：根据配置动态选择模板：
+	"""
 	def __init__(
 		self,
 		max_actions_per_step: int = 3,
@@ -106,6 +112,29 @@ class SystemPrompt:
 
 
 class AgentMessagePrompt:
+	"""
+	用途：构建每一步的用户消息，描述当前状态
+
+	使用场景：Agent 每次调用 LLM 前，告诉它"现在发生了什么"
+
+	核心方法：
+
+		_get_browser_state_description()：生成浏览器状态
+
+		页面统计（链接数、iframe、Shadow DOM 等）
+		标签页列表、当前 URL、滚动位置
+		可交互元素列表（DOM 简化表示）
+		_get_agent_state_description()：生成 Agent 状态
+
+		任务目标 (<user_request>)
+		文件系统状态 (<file_system>)
+		Todo 列表 (<todo_contents>)
+		步骤信息 (<step_info>)
+		get_user_message()：组合最终消息
+
+		整合 <agent_history>、<agent_state>、<browser_state>
+		如果启用视觉，附加截图和图片
+	"""
 	vision_detail_level: Literal['auto', 'low', 'high']
 
 	def __init__(
@@ -150,7 +179,7 @@ class AgentMessagePrompt:
 		assert self.browser_state
 
 	def _extract_page_statistics(self) -> dict[str, int]:
-		"""Extract high-level page statistics from DOM tree for LLM context"""
+		"""生成高质量的页面统计：Extract high-level page statistics from DOM tree for LLM context"""
 		stats = {
 			'links': 0,
 			'iframes': 0,
@@ -166,7 +195,7 @@ class AgentMessagePrompt:
 			return stats
 
 		def traverse_node(node: SimplifiedNode) -> None:
-			"""Recursively traverse simplified DOM tree to count elements"""
+			"""递归遍历简化的DOM树来计算元素Recursively traverse simplified DOM tree to count elements"""
 			if not node or not node.original_node:
 				return
 
@@ -220,6 +249,11 @@ class AgentMessagePrompt:
 
 	@observe_debug(ignore_input=True, ignore_output=True, name='_get_browser_state_description')
 	def _get_browser_state_description(self) -> str:
+		"""生成浏览器状态
+		页面统计（链接数、iframe、Shadow DOM 等）
+        标签页列表、当前 URL、滚动位置
+        可交互元素列表（DOM 简化表示）
+		"""
 		# Extract page statistics first
 		page_stats = self._extract_page_statistics()
 
@@ -321,6 +355,12 @@ Available tabs:
 		return browser_state
 
 	def _get_agent_state_description(self) -> str:
+		"""生成agent状态生成 Agent 状态
+		任务目标 (<user_request>)
+		文件系统状态 (<file_system>)
+		Todo 列表 (<todo_contents>)
+		步骤信息 (<step_info>)
+		"""
 		if self.step_info:
 			step_info_description = f'Step{self.step_info.step_number + 1} maximum:{self.step_info.max_steps}\n'
 		else:
@@ -383,7 +423,12 @@ Available tabs:
 
 	@observe_debug(ignore_input=True, ignore_output=True, name='get_user_message')
 	def get_user_message(self, use_vision: bool = True) -> UserMessage:
-		"""Get complete state as a single cached message"""
+		"""组合最终消息：
+		Get complete state as a single cached message
+		
+		整合 <agent_history>、<agent_state>、<browser_state>
+		
+		"""
 		# Don't pass screenshot to model if page is a new tab page, step is 0, and there's only one tab
 		if (
 			is_new_tab_page(self.browser_state.url)
@@ -487,6 +532,13 @@ Available tabs:
 
 
 def get_rerun_summary_prompt(original_task: str, total_steps: int, success_count: int, error_count: int) -> str:
+	"""
+	用途：浏览器自动化 / AI Agent 的 rerun 任务完成度分析设计的提示词，基于截图 + 执行统计信息输出标准化复盘结果
+
+	使用场景：任务回放（Rerun）完成后，让 LLM 分析结果
+
+	输入：原始任务、总步数、成功/失败步数
+	"""
 	return f'''You are analyzing the completion of a rerun task. Based on the screenshot and execution info, provide a summary.
 
 Original task: {original_task}
@@ -507,8 +559,11 @@ Respond with:
 - completion_status: One of "complete", "partial", or "failed"'''
 
 
+# 将回放总结提示词包装成 UserMessage
 def get_rerun_summary_message(prompt: str, screenshot_b64: str | None = None) -> UserMessage:
 	"""
+	1. 将回放总结提示词包装成 UserMessage
+	2. 配合 get_rerun_summary_prompt() 使用，可附加截图
 	Build a UserMessage for rerun summary generation.
 
 	Args:
@@ -535,6 +590,9 @@ def get_rerun_summary_message(prompt: str, screenshot_b64: str | None = None) ->
 
 def get_ai_step_system_prompt() -> str:
 	"""
+	- 定义数据提取专家的系统提示词-----用于extracting data动作的
+	- 使用场景：extract 动作或 AI Step 子任务
+    - 特点：强调"只从网页提取，不捏造数据"
 	Get system prompt for AI step action used during rerun.
 
 	Returns:
@@ -576,5 +634,15 @@ def get_ai_step_user_prompt(query: str, stats_summary: str, content: str) -> str
 
 	Returns:
 		Formatted prompt string
+
+	用途：构建数据提取的用户输入
+
+	使用场景：配合 get_ai_step_system_prompt() 使用
+
+	格式：
+
+	<query>用户查询</query>
+	<content_stats>内容统计</content_stats>
+	<webpage_content>网页 Markdown</webpage_content>
 	"""
 	return f'<query>\n{query}\n</query>\n\n<content_stats>\n{stats_summary}\n</content_stats>\n\n<webpage_content>\n{content}\n</webpage_content>'
