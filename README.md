@@ -30,5 +30,5 @@ cp .env.example .env
 # 获取 API key: https://cloud.browser-use.com/new-api-key
 
 # 5. 运行示例
-uv run examples/simple.py
+uv run ./test-browser-task.py
 ```
