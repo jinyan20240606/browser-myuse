@@ -26,7 +26,9 @@ Or as an MCP server in Claude Desktop or other MCP clients:
 import os
 import sys
 
+from browser_use.agent.views import AgentHistoryList
 from browser_use.llm import ChatAWSBedrock
+from browser_use.workflow_dsl.views import WorkflowAgentRunResult
 
 # Set environment variables BEFORE any browser_use imports to prevent early logging
 os.environ['BROWSER_USE_LOGGING_LEVEL'] = 'critical'
@@ -640,30 +642,31 @@ class BrowserUseServer:
 		)
 
 		try:
-			history = await agent.run(max_steps=max_steps)
+			run_result = await agent.run(max_steps=max_steps)
 
 			# Format results
 			results = []
-			results.append(f'Task completed in {len(history.history)} steps')
-			results.append(f'Success: {history.is_successful()}')
+			if isinstance(run_result, AgentHistoryList):
+				results.append(f'Task completed in {len(run_result.history)} steps')
+				results.append(f'Success: {run_result.is_successful()}')
 
-			# Get final result if available
-			final_result = history.final_result()
-			if final_result:
-				results.append(f'\nFinal result:\n{final_result}')
+				final_result = run_result.final_result()
+				if final_result:
+					results.append(f'\nFinal result:\n{final_result}')
 
-			# Include any errors
-			errors = history.errors()
-			if errors:
-				results.append(f'\nErrors encountered:\n{json.dumps(errors, indent=2)}')
+				errors = run_result.errors()
+				if errors:
+					results.append(f'\nErrors encountered:\n{json.dumps(errors, indent=2)}')
 
-			# Include URLs visited
-			urls = history.urls()
-			if urls:
-				# Filter out None values and convert to strings
-				valid_urls = [str(url) for url in urls if url is not None]
-				if valid_urls:
-					results.append(f'\nURLs visited: {", ".join(valid_urls)}')
+				urls = run_result.urls()
+				if urls:
+					valid_urls = [str(url) for url in urls if url is not None]
+					if valid_urls:
+						results.append(f'\nURLs visited: {", ".join(valid_urls)}')
+			elif isinstance(run_result, WorkflowAgentRunResult):
+				results.extend(self._format_workflow_run_result(run_result))
+			else:
+				raise TypeError(f'Unsupported agent run result type: {type(run_result)}')
 
 			return '\n'.join(results)
 
@@ -673,6 +676,45 @@ class BrowserUseServer:
 		finally:
 			# Clean up
 			await agent.close()
+
+	def _format_workflow_run_result(self, run_result: WorkflowAgentRunResult) -> list[str]:
+		"""格式化 workflow mode 的 Agent 统一返回结果。"""
+		results: list[str] = []
+		artifacts = run_result.artifacts
+		execution = run_result.execution
+
+		if artifacts is not None and artifacts.history is not None:
+			history = artifacts.history
+			results.append(f'Workflow completed in {len(history.entries)} turns')
+			results.append(f'Workflow mode: {history.mode}')
+		else:
+			results.append(f'Workflow mode: {run_result.mode}')
+			results.append(f'Workflow completed steps: {execution.completed_steps}/{execution.total_steps}')
+
+		results.append(f'Success: {execution.success}')
+
+		if execution.outputs:
+			results.append(f'\nFinal result:\n{execution.outputs[-1]}')
+		elif artifacts is not None and artifacts.history is not None and artifacts.history.entries:
+			last_entry = artifacts.history.entries[-1]
+			if last_entry.outputs:
+				results.append(f'\nFinal result:\n{last_entry.outputs[-1]}')
+
+		if execution.error is not None:
+			results.append(f'\nErrors encountered:\n{execution.error.error_message}')
+
+		if run_result.record_summary is not None:
+			results.append(f'Workflow recorded to: {run_result.record_summary.output_path}')
+			results.append(f'Record steps: {run_result.record_summary.step_count}')
+			results.append(f'Replay steps: {run_result.record_summary.replay_step_count or 0}')
+			results.append(f'Planner turns: {run_result.record_summary.planner_turns or 0}')
+		elif artifacts is not None:
+			if artifacts.record_document is not None:
+				results.append(f'Record steps: {len(artifacts.record_document.steps)}')
+			if artifacts.replay_document is not None:
+				results.append(f'Replay steps: {len(artifacts.replay_document.steps)}')
+
+		return results
 
 	async def _navigate(self, url: str, new_tab: bool = False) -> str:
 		"""Navigate to a URL."""

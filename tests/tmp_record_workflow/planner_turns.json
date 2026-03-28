@@ -1,0 +1,23 @@
+[
+  {
+    "step_number": 1,
+    "plan": [
+      {
+        "id": "step_1",
+        "name": null,
+        "comment": null,
+        "action": "click",
+        "params": {
+          "index": 1
+        },
+        "timeout_ms": null,
+        "optional": false,
+        "then_steps": [],
+        "else_steps": [],
+        "steps": []
+      }
+    ],
+    "result_summary": "- step_1: success",
+    "error": null
+  }
+]

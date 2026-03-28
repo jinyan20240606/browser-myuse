@@ -2,6 +2,7 @@
 Utilities for creating optimized Pydantic schemas for LLM usage.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 from pydantic import BaseModel
@@ -35,9 +36,17 @@ class SchemaOptimizer:
 
 		# Create optimized schema with flattening
 		# Pass flags to optimize_schema via closure
-		def optimize_schema(obj: Any, defs_lookup: dict[str, Any] | None = None, *, in_properties: bool = False) -> Any:
-			"""Apply all optimization techniques including flattening all $ref/$defs"""
-			if isinstance(obj, dict):
+		seen_refs: set[str] = set()
+
+		def optimize_schema(
+			obj: Any,
+			defs_lookup: dict[str, Any] | None = None,
+			*,
+			in_properties: bool = False,
+			active_refs: tuple[str, ...] = (),
+		) -> Any:
+			"""Apply all optimization techniques including flattening all $ref/$defs."""
+			if isinstance(obj, Mapping):
 				optimized: dict[str, Any] = {}
 				flattened_ref: dict[str, Any] | None = None
 
@@ -65,9 +74,17 @@ class SchemaOptimizer:
 					elif key == '$ref' and defs_lookup:
 						ref_path = value.split('/')[-1]  # Get the definition name from "#/$defs/SomeName"
 						if ref_path in defs_lookup:
-							# Get the referenced definition and flatten it
-							referenced_def = defs_lookup[ref_path]
-							flattened_ref = optimize_schema(referenced_def, defs_lookup)
+							if ref_path in active_refs:
+								flattened_ref = {'$ref': value}
+								seen_refs.add(ref_path)
+							else:
+								# Get the referenced definition and flatten it
+								referenced_def = defs_lookup[ref_path]
+								flattened_ref = optimize_schema(
+									referenced_def,
+									defs_lookup,
+									active_refs=(*active_refs, ref_path),
+								)
 
 					# Skip minItems/min_items and default if requested (check BEFORE processing)
 					elif key in ('minItems', 'min_items') and remove_min_items:
@@ -77,7 +94,9 @@ class SchemaOptimizer:
 
 					# Keep all anyOf structures (action unions) and resolve any $refs within
 					elif key == 'anyOf' and isinstance(value, list):
-						optimized[key] = [optimize_schema(item, defs_lookup) for item in value]
+						optimized[key] = [
+							optimize_schema(item, defs_lookup, active_refs=active_refs) for item in value
+						]
 
 					# Recursively optimize nested structures
 					elif key in ['properties', 'items']:
@@ -85,6 +104,7 @@ class SchemaOptimizer:
 							value,
 							defs_lookup,
 							in_properties=(key == 'properties'),
+							active_refs=active_refs,
 						)
 
 					# Keep essential validation fields
@@ -99,11 +119,19 @@ class SchemaOptimizer:
 						'pattern',
 						'default',
 					]:
-						optimized[key] = value if not isinstance(value, (dict, list)) else optimize_schema(value, defs_lookup)
+						optimized[key] = (
+							value
+							if not isinstance(value, (dict, list))
+							else optimize_schema(value, defs_lookup, active_refs=active_refs)
+						)
 
 					# Recursively process all other fields
 					else:
-						optimized[key] = optimize_schema(value, defs_lookup) if isinstance(value, (dict, list)) else value
+						optimized[key] = (
+							optimize_schema(value, defs_lookup, active_refs=active_refs)
+							if isinstance(value, (dict, list))
+							else value
+						)
 
 				# If we have a flattened reference, merge it with the optimized properties
 				if flattened_ref is not None and isinstance(flattened_ref, dict):
@@ -132,6 +160,11 @@ class SchemaOptimizer:
 			return obj
 
 		optimized_result = optimize_schema(original_schema, defs_lookup)
+
+		if seen_refs and isinstance(optimized_result, dict):
+			# Cyclic references cannot be fully inlined safely.
+			# Preserve the unresolved refs at the root so downstream schema consumers can still resolve them.
+			optimized_result['$defs'] = {name: defs_lookup[name] for name in seen_refs if name in defs_lookup}
 
 		# Ensure we have a dictionary (should always be the case for schema root)
 		if not isinstance(optimized_result, dict):

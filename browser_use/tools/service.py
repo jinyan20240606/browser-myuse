@@ -310,7 +310,7 @@ class Tools(Generic[Context]):
 				if node is None:
 					msg = f'Element index {params.index} not available - page may have changed. Try refreshing browser state.'
 					logger.warning(f'⚠️ {msg}')
-					return ActionResult(extracted_content=msg)
+					return ActionResult(error=msg)
 
 				# Get description of clicked element
 				element_desc = get_click_description(node)
@@ -377,7 +377,7 @@ class Tools(Generic[Context]):
 			if node is None:
 				msg = f'Element index {params.index} not available - page may have changed. Try refreshing browser state.'
 				logger.warning(f'⚠️ {msg}')
-				return ActionResult(extracted_content=msg)
+				return ActionResult(error=msg)
 
 			# Highlight the element being typed into (truly non-blocking)
 			create_task_with_error_handling(
@@ -956,7 +956,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			if node is None:
 				msg = f'Element index {params.index} not available - page may have changed. Try refreshing browser state.'
 				logger.warning(f'⚠️ {msg}')
-				return ActionResult(extracted_content=msg)
+				return ActionResult(error=msg)
 
 			# Dispatch GetDropdownOptionsEvent to the event handler
 
@@ -984,7 +984,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			if node is None:
 				msg = f'Element index {params.index} not available - page may have changed. Try refreshing browser state.'
 				logger.warning(f'⚠️ {msg}')
-				return ActionResult(extracted_content=msg)
+				return ActionResult(error=msg)
 
 			# Dispatch SelectDropdownOptionEvent to the event handler
 			from browser_use.browser.events import SelectDropdownOptionEvent

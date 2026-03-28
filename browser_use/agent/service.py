@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 	# 防止循环导入，仅在类型检查时导入 Skill 类型
 	from browser_use.skills.views import Skill
 
+from browser_use.workflow_dsl.views import WorkflowAgentRunResult
+
 from dotenv import load_dotenv  # 加载 .env 环境变量文件
 
 from browser_use.agent.cloud_events import (
@@ -59,6 +61,7 @@ from browser_use.agent.views import (
 	DetectedVariable,
 	JudgementResult,
 	StepMetadata,
+	create_model,
 )  # 代理相关的视图/数据模型导入（历史、输出、设置等）
 from browser_use.browser.session import DEFAULT_BROWSER_PROFILE  # 默认浏览器配置
 from browser_use.browser.views import BrowserStateSummary  # 浏览器状态摘要模型
@@ -162,8 +165,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			| None
 		) = None,
 		register_done_callback: (
-			Callable[['AgentHistoryList'], Awaitable[None]]  # Async Callback
-			| Callable[['AgentHistoryList'], None]  # Sync Callback
+			Callable[['AgentHistoryList | WorkflowAgentRunResult'], Awaitable[None]]  # Async Callback
+			| Callable[['AgentHistoryList | WorkflowAgentRunResult'], None]  # Sync Callback
 			| None
 		) = None,
 		register_external_agent_status_raise_error_callback: Callable[[], Awaitable[bool]] | None = None,
@@ -192,6 +195,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		injected_agent_state: AgentState | None = None,
 		source: str | None = None,
 		file_system_path: str | None = None,
+		workflow_mode: Literal['react', 'record', 'replay'] = 'react',
+		workflow_dsl_path: str | Path | None = None,
+		workflow_runtime_vars: dict[str, Any] | None = None,
 		task_id: str | None = None,
 		calculate_cost: bool = False,
 		display_files_in_done_text: bool = True,
@@ -422,6 +428,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		timestamp = int(time.time())
 		base_tmp = Path(tempfile.gettempdir())
 		self.agent_directory = base_tmp / f'browser_use_agent_{self.id}_{timestamp}'
+
+		# Workflow DSL state
+		self.workflow_mode = workflow_mode
+		self.workflow_dsl_path = workflow_dsl_path
+		self.workflow_runtime_vars = workflow_runtime_vars or {}
+		self.workflow_record_summary = None
+		self.workflow_artifacts = None
 
 		# Initialize file system and screenshot service
 		# 为每个 Agent 实例创建唯一的临时目录（基于系统临时目录 + Agent ID + 时间戳），用于存储该 Agent 运行过程中产生的临时文件（截图、录屏、对话记录等）”
@@ -1078,13 +1091,16 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.step_start_time = time.time()
 		# 初始化浏览器状态摘要（后续赋值）
 		browser_state_summary = None 
+		self._current_browser_state_summary = None
 
 		try:
 			# 阶段 1: 准备上下文和计时
 			browser_state_summary = await self._prepare_context(step_info)
+			self._current_browser_state_summary = browser_state_summary
 
 			# 阶段 2: 获取模型输出并执行动作（核心：LLM决策 + 浏览器操作）
-			await self._get_next_action(browser_state_summary)
+			if self.workflow_mode != 'record':
+				await self._get_next_action(browser_state_summary)
 			# 执行动作（如点击、输入、导航）
 			await self._execute_actions()
 
@@ -1246,6 +1262,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# 执行多个动作（最多 max_actions_per_step 个）
 		result = await self.multi_act(self.state.last_model_output.action)
 		self.state.last_result = result
+
 
 	async def _post_process(self) -> None:
 		"""
@@ -2464,17 +2481,19 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		max_steps: int = 100,  # 最大执行步数，默认100步
 		on_step_start: AgentHookFunc | None = None,  # 每步开始前的回调函数
 		on_step_end: AgentHookFunc | None = None,  # 每步结束后的回调函数
-	) -> AgentHistoryList[AgentStructuredOutput]:
+	) -> AgentHistoryList[AgentStructuredOutput] | WorkflowAgentRunResult:
 		"""
 		执行任务的主要方法 - 运行 Agent 完成指定任务
-		- 作用：按照指定的最大步数运行智能体完成任务，同时处理暂停 / 终止信号、记录遥测数据、分发事件、清理资源，最终返回执行历史
+		- 作用：按照指定的最大步数运行智能体完成任务，同时处理暂停 / 终止信号、记录遥测数据、分发事件、清理资源。
+		- `react` 模式返回旧 [`AgentHistoryList`](browser_use/agent/views.py:731) 兼容结果。
+		- `record/replay` 模式统一返回 [`WorkflowAgentRunResult`](browser_use/workflow_dsl/views.py:148)。
 		Args:
 		    max_steps: 最大执行步数，防止无限循环
 		    on_step_start: 每步开始前的回调函数
 		    on_step_end: 每步结束后的回调函数
 			
 		Returns:
-		    AgentHistoryList: 执行历史记录列表，包含每一步的执行结果
+		    `react` 模式返回 [`AgentHistoryList`](browser_use/agent/views.py:731)；workflow 模式返回 [`WorkflowAgentRunResult`](browser_use/workflow_dsl/views.py:148)。
 		"""
 		# 获取异步循环、初始化错误追踪、强制退出标记
 		loop = asyncio.get_event_loop()
@@ -2512,6 +2531,64 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.debug(
 				f'🔧 Agent setup: Agent Session ID {self.session_id[-4:]}, Task ID {self.task_id[-4:]}, Browser Session ID {self.browser_session.id[-4:] if self.browser_session else "None"} {"(connecting via CDP)" if (self.browser_session and self.browser_session.cdp_url) else "(launching local browser)"}'
 			)
+			
+			if self.workflow_mode in {'record', 'replay'}:
+				from browser_use.workflow_dsl import WorkflowAgentRunResult, WorkflowRuntime
+				assert self.browser_session is not None
+				self.logger.debug('🌐 Starting browser session for workflow mode...')
+				await self.browser_session.start()
+				runtime = WorkflowRuntime(
+					tools=self.tools,
+					browser_session=self.browser_session,
+					llm=self.llm if self.workflow_mode == 'record' else None,
+					max_planner_steps=self.settings.max_actions_per_step,
+				)
+
+				if self.workflow_mode == 'replay':
+					if not self.workflow_dsl_path:
+						raise ValueError("workflow_dsl_path must be provided when workflow_mode is 'replay'")
+					execution = await runtime.replay(self.workflow_dsl_path, runtime_variables=self.workflow_runtime_vars)
+					self.workflow_artifacts = runtime.last_artifacts
+					workflow_result = WorkflowAgentRunResult(
+						mode='replay',
+						execution=execution,
+						artifacts=self.workflow_artifacts,
+					)
+					if not execution.success and execution.error:
+						self.logger.error(f"Replay failed at step {execution.error.failed_step.id}: {execution.error.error_message}")
+					if self.register_done_callback:
+						if inspect.iscoroutinefunction(self.register_done_callback):
+							await self.register_done_callback(workflow_result)
+						else:
+							self.register_done_callback(workflow_result)
+					return workflow_result
+
+				self.logger.info('Workflow record mode enabled: delegating to WorkflowRuntime.')
+				execution, summary, document = await runtime.record(
+					task=self.task,
+					runtime_variables=self.workflow_runtime_vars,
+					max_turns=max_steps,
+					output_path=self.workflow_dsl_path or (self.agent_directory / 'recorded_workflow.md'),
+					document_id=f'{self.task_id}_workflow',
+					document_name=self.task[:80],
+					start_url=self.initial_url,
+				)
+				self.workflow_record_summary = summary
+				self.workflow_artifacts = runtime.last_artifacts
+				workflow_result = WorkflowAgentRunResult(
+					mode='record',
+					execution=execution,
+					artifacts=self.workflow_artifacts,
+					record_summary=summary,
+				)
+				if not execution.success and execution.error:
+					self.logger.error(f"Record failed at step {execution.error.failed_step.id}: {execution.error.error_message}")
+				if self.register_done_callback:
+					if inspect.iscoroutinefunction(self.register_done_callback):
+						await self.register_done_callback(workflow_result)
+					else:
+						self.register_done_callback(workflow_result)
+				return workflow_result
 
 			# Initialize timing for session and task
 			self._session_start_time = time.time()
@@ -3888,8 +3965,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		max_steps: int = 100,
 		on_step_start: AgentHookFunc | None = None,
 		on_step_end: AgentHookFunc | None = None,
-	) -> AgentHistoryList[AgentStructuredOutput]:
-		"""异步 run 方法的同步包装器，以便在没有 asyncio 的情况下更容易使用"""
+	) -> AgentHistoryList[AgentStructuredOutput] | WorkflowAgentRunResult:
+		"""异步 [`Agent.run()`](browser_use/agent/service.py:2477) 的同步包装器，返回值与运行模式保持一致。"""
 		import asyncio
 
 		return asyncio.run(self.run(max_steps=max_steps, on_step_start=on_step_start, on_step_end=on_step_end))

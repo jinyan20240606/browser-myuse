@@ -25,7 +25,6 @@ dist/
 *.txt
 *.pdf
 *.csv
-*.json
 *.jsonl
 *.log
 *.bak
@@ -76,7 +75,6 @@ result2.md
 result3.md
 Brainstorm.md
 example.ipynb
-*SUMMARY.md
 todo.md
 product_extraction.ipynb
 product_extraction.py
