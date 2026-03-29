@@ -1,444 +1,254 @@
-# Workflow DSL 重构收敛总结
+# Record / Replay 架构文档
 
-## 1. 背景
+## 1. 当前架构（React + Recorder）
 
-本次重构目标是将浏览器自动化链路从旧的实时 ReAct action 主导模式，逐步收敛到 [`DSL_ARCHITECTURE_DESIGN.md`](DSL_ARCHITECTURE_DESIGN.md) 定义的 **Workflow-first** 架构：
+当前实现已从旧的独立 `workflow-dsl` 架构切换为 **React 主链路兼容录制**：
 
-- 在线阶段：Planner 基于最新页面快照生成 `WorkflowStep DSL`
-- 执行阶段：Executor 按 step DSL 调用已有 tool/action
-- 修复阶段：失败后生成结构化错误反馈并驱动 Repair Loop
-- 沉淀阶段：Compiler 输出录制态 / 回放态 DSL
-- 复用阶段：ReplayEngine / Runtime 直接 0-token 回放 DSL
-
-当前实现已经从 MVP 阶段的“事后从成功历史编译 DSL”推进到：
-
-- record 模式由 [`WorkflowRuntime`](browser_use/workflow_dsl/runtime.py) 驱动
-- 每轮由 [`WorkflowPlanner`](browser_use/workflow_dsl/planner.py) 生成 DSL step batch
-- [`StepExecutor`](browser_use/workflow_dsl/executor.py) 执行并生成结构化反馈
-- [`WorkflowArtifacts`](browser_use/workflow_dsl/views.py) 成为 workflow-native 结果出口
+- `record` 模式不再走独立的 Planner / Executor / Runtime
+- `record` = React 原生推理 + 旁路 Recorder
+- `replay` 暂保留对 `WorkflowRuntime.replay()` 的消费能力
+- 未来目标：逐步删除 `browser_use/workflow_dsl/` 目录
 
 ---
 
-## 2. 本次关键重构改动点
+## 2. 三种模式执行流程
 
-### 2.1 数据模型与 DSL 视图层
+### 2.1 react 模式（默认）
 
-核心文件：
-- [`browser_use/workflow_dsl/views.py`](browser_use/workflow_dsl/views.py)
+```
+Agent.run()
+  → React 主循环 (while n_steps <= max_steps)
+    → step()
+      → _prepare_context()：获取浏览器状态
+      → _get_next_action()：LLM 推理（MessageManager + AgentOutput）
+      → _execute_actions()：multi_act()
+      → _post_process()：失败计数、下载检查
+      → _finalize()：记录 AgentHistory
+  → 返回 AgentHistoryList
+```
 
-完成内容：
-- 重构 [`WorkflowStep`](browser_use/workflow_dsl/views.py)
-  - 支持 `params`
-  - 支持 `then_steps` / `else_steps` / `steps`
-  - 支持 `if` / `loop_for` / `loop_until` / `set_variable` 控制流
-- 重构 [`WorkflowDocument`](browser_use/workflow_dsl/views.py)
-- 重构 [`ExecutionErrorFeedback`](browser_use/workflow_dsl/views.py)
-  - 增加 `resolved_params`
-  - 增加 `repair_hint`
-  - 保留 `last_success_step` / `runtime_variables`
-- 重构 [`WorkflowExecutionResult`](browser_use/workflow_dsl/views.py)
-- 增加 workflow-native 结果结构：
-  - [`WorkflowPlannerContext`](browser_use/workflow_dsl/views.py)
-  - [`WorkflowPlannerTurn`](browser_use/workflow_dsl/views.py)
-  - [`WorkflowHistoryEntry`](browser_use/workflow_dsl/views.py)
-  - [`WorkflowHistory`](browser_use/workflow_dsl/views.py)
-  - [`WorkflowArtifacts`](browser_use/workflow_dsl/views.py)
-  - [`WorkflowRecordSummary`](browser_use/workflow_dsl/views.py)
+### 2.2 record 模式（React + Recorder）
 
-意义：
-- 把 workflow mode 的历史、工件、反馈从旧 [`AgentHistory`](browser_use/agent/views.py) 语义中剥离出来。
+```
+Agent.run()
+  → React 主循环（与 react 模式完全相同）
+    → step()
+      → _prepare_context()
+      → _get_next_action()：使用 Agent 原生 LLM 推理
+      → _execute_actions()：multi_act()
+      → _post_process()
+      → _finalize()
+        → _record_workflow_steps()  ★ 旁路录制
+          将成功执行的 action 映射为 WorkflowStep
+  → _build_record_result()  ★ 编译产物
+    → 自动补齐 navigate 首步（如果有 initial_url）
+    → WorkflowCompiler.compile() → record.md + replay.md
+    → 保存 history.json + manifest.json
+  → 返回 WorkflowAgentRunResult
+```
 
----
+### 2.3 replay 模式（消费 DSL）
 
-### 2.2 Parser 层
-
-核心文件：
-- [`browser_use/workflow_dsl/parser.py`](browser_use/workflow_dsl/parser.py)
-
-完成内容：
-- 重构 [`WorkflowParser.parse_markdown()`](browser_use/workflow_dsl/parser.py)
-- 支持 markdown / YAML 两种 DSL 文档输入
-- 严格校验：
-  - `steps` 必须为列表
-  - 每个 step 必须有 `action`
-  - `then_steps` / `else_steps` / `steps` 必须为列表
-- 明确区分：
-  - step metadata
-  - step params
-  - nested control-flow steps
-
-意义：
-- 让 DSL 文件格式更稳定、可机器解析，符合设计文档“结构化、可读、适合保存”的要求。
+```
+Agent.run()
+  → WorkflowRuntime.replay()
+    → 解析 replay DSL（markdown / YAML）
+    → StepExecutor 逐步执行
+    → 生成 WorkflowHistory
+  → 返回 WorkflowAgentRunResult
+```
 
 ---
 
-### 2.3 Planner 层
+## 3. 核心代码位置
 
-核心文件：
-- [`browser_use/workflow_dsl/planner.py`](browser_use/workflow_dsl/planner.py)
-
-完成内容：
-- 新增 [`WorkflowPlanner`](browser_use/workflow_dsl/planner.py)
-- 新增 [`PlannerStepPlan`](browser_use/workflow_dsl/planner.py)
-- 新增 [`WorkflowRepairLoop`](browser_use/workflow_dsl/planner.py)
-- Planner 现在直接依赖 [`Tools`](browser_use/workflow_dsl/planner.py) registry，而不是只吃自然语言 action 描述
-- 直接从 registry 提取结构化 action schema：
-  - [`_build_action_schemas()`](browser_use/workflow_dsl/planner.py)
-- 对 Planner 输出做 action 合法性校验：
-  - [`_validate_plan_actions()`](browser_use/workflow_dsl/planner.py)
-- 专门化 Planner prompt：
-  - 强调 `snapshot -> step DSL -> executor -> feedback -> repaired step DSL`
-  - 强调 DSL 是 tool schema 的持久化表达
-  - 强调只能使用 `available_actions`
-- 专门化 Planner 上下文：
-  - 最新 browser snapshot
-  - recent successful steps
-  - planner turn summary
-  - structured last error
-  - runtime variables
-
-意义：
-- 让 Planner 更接近设计文档中的“唯一合法 DSL 输出生成器”。
+| 模块 | 文件 | 说明 |
+|------|------|------|
+| Agent 主链路 | [`browser_use/agent/service.py`](browser_use/agent/service.py) | 三种模式的统一入口 |
+| 录制步骤映射 | [`_record_workflow_steps()`](browser_use/agent/service.py) | 在 `_finalize()` 中将成功 action → WorkflowStep |
+| 产物编译保存 | [`_build_record_result()`](browser_use/agent/service.py) | run 结束时编译 record/replay 文档并落盘 |
+| DSL 数据模型 | [`browser_use/workflow_dsl/views.py`](browser_use/workflow_dsl/views.py) | WorkflowStep / WorkflowDocument 等 |
+| DSL 编译器 | [`browser_use/workflow_dsl/compiler.py`](browser_use/workflow_dsl/compiler.py) | 编译成 record.md / replay.md |
+| DSL 解析器 | [`browser_use/workflow_dsl/parser.py`](browser_use/workflow_dsl/parser.py) | 解析 DSL 文件 |
+| Replay 执行 | [`browser_use/workflow_dsl/runtime.py`](browser_use/workflow_dsl/runtime.py) | replay 模式的 DSL 消费引擎 |
+| Step 执行器 | [`browser_use/workflow_dsl/executor.py`](browser_use/workflow_dsl/executor.py) | replay 模式的步骤执行器 |
 
 ---
 
-### 2.4 Executor 层
+## 4. 录制产物结构
 
-核心文件：
-- [`browser_use/workflow_dsl/executor.py`](browser_use/workflow_dsl/executor.py)
+record 模式会在指定路径下生成 bundle 目录：
 
-完成内容：
-- 重构 [`StepExecutor.execute()`](browser_use/workflow_dsl/executor.py)
-- 复用现有 [`registry.execute_action()`](browser_use/workflow_dsl/executor.py)
-- 支持变量递归替换：
-  - 字符串
-  - 列表
-  - 字典
-- 支持控制流执行：
-  - `if`
-  - `loop_for`
-  - `loop_until`
-  - `set_variable`
-- 增加 action schema 基础校验：
-  - [`_validate_step_schema()`](browser_use/workflow_dsl/executor.py)
-- 增加基础 post-condition validation：
-  - [`_validate_action_result()`](browser_use/workflow_dsl/executor.py)
-- 增加失败反馈生成：
-  - [`create_error_feedback()`](browser_use/workflow_dsl/executor.py)
+```
+tests/acceptance_record/
+├── record.md        # 录制态 DSL（保留原始顺序）
+├── replay.md        # 回放态 DSL（去重压缩后）
+├── history.json     # 录制历史（每步的 planned/executed steps）
+└── manifest.json    # 产物清单
+```
 
-当前已做的验证能力：
-- `input/fill` 需要有基础可观察确认
-- `navigate/open` 需要有基础可观察确认
-- 使用 `output_variable` 的 action 需要产生可提取输出
+### 产物示例（record.md）
 
-当前仍不足的地方见后文“存在问题”。
+```yaml
+---
+id: xxx_workflow
+name: 打开百度搜索张雪峰
+task: 打开 https://www.baidu.com ，搜索张雪峰，点击搜索按钮，然后结束任务
+start_url: https://www.baidu.com
+steps:
+- id: step_0
+  action: navigate
+  url: https://www.baidu.com
+- id: step_1
+  action: input
+  index: 12
+  text: 张雪峰
+  clear: true
+- id: step_2
+  action: click
+  index: 367
+---
+```
 
 ---
 
-### 2.5 Compiler 层
+## 5. 关键设计决策
 
-核心文件：
-- [`browser_use/workflow_dsl/compiler.py`](browser_use/workflow_dsl/compiler.py)
+### 5.1 为什么 record 不走独立 Planner
 
-完成内容：
-- 重构 [`WorkflowCompiler.compile()`](browser_use/workflow_dsl/compiler.py)
-- 支持 `mode='record' | 'replay'`
-  - `record`：保留原始顺序与重复 steps
-  - `replay`：压缩重复 step
-- 支持：
-  - `start_url`
-  - `to_dict()`
-  - `to_markdown()`
-  - `save()`
-- 自动提取 `input_variables`
+| 维度 | 旧方案（独立 Planner） | 新方案（React + Recorder） |
+|------|----------------------|--------------------------|
+| LLM 推理 | 独立 WorkflowPlanner | Agent 原生推理链 |
+| 执行器 | 独立 StepExecutor | Agent.multi_act() |
+| 消息管理 | 无 MessageManager | 复用 MessageManager |
+| 历史记录 | WorkflowHistory only | AgentHistory + WorkflowHistory |
+| Done 判定 | planner.is_done | Agent 原生 done action |
+| 错误恢复 | repair loop (re-plan) | Agent 原生 consecutive_failures |
+| System Prompt | workflow planner 角色 | Agent 标准 system prompt |
+| 产物格式 | 相同 | 相同 |
 
-意义：
-- 开始区分录制态 DSL 与回放态 DSL，符合设计文档“record / replay 分层”方向。
+核心收益：
+- **复用 React 全部能力**（thinking/memory/evaluation/fallback LLM/demo mode/skills/tools）
+- **录制器只是旁路观察者**，不影响执行链路
+- **产物质量更高**，因为只录制真实执行成功的动作
 
----
+### 5.2 录制时的过滤策略
 
-### 2.6 Runtime / Replay 层
+- ✅ 只录制执行成功的浏览器动作（input / click / navigate / scroll 等）
+- ❌ 跳过 `done` 动作（非浏览器动作，replay 不需要）
+- ❌ 跳过执行失败的动作（不计入产物）
+- ✅ 自动补齐 `navigate` 首步（从 `initial_url` 推断）
 
-核心文件：
-- [`browser_use/workflow_dsl/runtime.py`](browser_use/workflow_dsl/runtime.py)
-- [`browser_use/workflow_dsl/replay.py`](browser_use/workflow_dsl/replay.py)
+### 5.3 日志标识
 
-完成内容：
-- 新增统一运行主干 [`WorkflowRuntime`](browser_use/workflow_dsl/runtime.py)
-  - [`record()`](browser_use/workflow_dsl/runtime.py)
-  - [`replay()`](browser_use/workflow_dsl/runtime.py)
-- [`ReplayEngine`](browser_use/workflow_dsl/replay.py) 已收敛为 runtime facade
-- Runtime 统一协调：
-  - Planner
-  - Executor
-  - Repair Loop
-  - Compiler
-  - Replay
-- workflow-native artifacts 统一沉淀到 [`last_artifacts`](browser_use/workflow_dsl/runtime.py)
+录制相关日志统一使用 `📝 Record:` 前缀：
 
-### 2.6.1 workflow-native history / artifact
-
-Runtime 现在会产出：
-- `record_document`
-- `replay_document`
-- [`WorkflowHistory`](browser_use/workflow_dsl/views.py)
-
-### 2.6.2 workflow-native artifact bundle 保存
-
-record 模式下会保存 bundle：
-- `record.md`
-- `replay.md`
-- `history.json`
-- `planner_turns.json`
-- `manifest.json`
-
-保存逻辑位于：
-- [`_save_record_artifacts()`](browser_use/workflow_dsl/runtime.py)
-
-意义：
-- workflow 结果不再只是一个 DSL 文件，而是一整套可调试、可沉淀、可复盘的 artifacts bundle。
+```
+INFO  📝 Record: 已录制 step_1 → input({'index': 12, 'text': '张雪峰', 'clear': True})
+INFO  📝 Record: 已录制 step_2 → click({'index': 367})
+INFO  📝 Record: 跳过 done 动作（非浏览器动作，不纳入录制产物）
+INFO  📝 Record: 自动补齐导航步骤 → navigate(url=https://www.baidu.com)
+INFO  📝 Record: 共录制 3 个步骤，开始编译产物...
+INFO  💾 Workflow record artifacts 已保存到 bundle: tests/acceptance_record
+```
 
 ---
 
-### 2.7 workflow-native 事件与日志
+## 6. 使用方式
 
-核心文件：
-- [`browser_use/workflow_dsl/events.py`](browser_use/workflow_dsl/events.py)
-- [`browser_use/workflow_dsl/runtime.py`](browser_use/workflow_dsl/runtime.py)
+### 6.1 record 模式
 
-完成内容：
-- 新增 workflow-native event：
-  - [`WorkflowPlannerTurnEvent`](browser_use/workflow_dsl/events.py)
-  - [`WorkflowStepBatchEvent`](browser_use/workflow_dsl/events.py)
-  - [`WorkflowRepairEvent`](browser_use/workflow_dsl/events.py)
-  - [`WorkflowArtifactsSavedEvent`](browser_use/workflow_dsl/events.py)
-  - [`WorkflowHistoryEvent`](browser_use/workflow_dsl/events.py)
-- Runtime 中已分发：
-  - planner turn start / finish
-  - step batch 执行结果
-  - repair loop error
-  - history entry
-  - artifacts 保存完成
+```python
+from browser_use import Agent, ChatOpenAI
 
-### 2.7.1 日志风格统一
+agent = Agent(
+    task='打开 https://www.baidu.com ，搜索张雪峰，点击搜索按钮，然后结束任务',
+    llm=ChatOpenAI(model='gpt-4.1-mini'),
+    workflow_mode='record',
+    workflow_dsl_path='output/my_workflow.md',
+)
 
-现在日志统一为：
-- 中文描述
-- 保留关键英文关键词：
-  - `Workflow Planner`
-  - `Workflow step`
-  - `Workflow replay`
-  - `Workflow artifacts`
-  - `bundle`
+result = agent.run_sync(max_steps=10)
 
-示例：
-- `📘 Workflow Planner 第 N 轮开始`
-- `🧭 已规划 Workflow steps: [...]`
-- `📦 已执行 Workflow steps: [...]`
-- `▶️ 开始 Workflow replay：...`
-- `💾 Workflow artifacts 已保存到 bundle: ...`
+# 访问产物
+print(result)                          # WorkflowAgentRunResult
+print(agent.workflow_record_summary)   # WorkflowRecordSummary
+print(agent.workflow_artifacts)        # WorkflowArtifacts
+```
 
-意义：
-- 让 workflow mode 的可观测性正式切到 workflow-native 语义，而不是旧 Agent step 语义。
+### 6.2 replay 模式
 
----
+```python
+agent = Agent(
+    task='Replay test',
+    llm=ChatOpenAI(model='gpt-4.1-mini'),
+    workflow_mode='replay',
+    workflow_dsl_path='output/my_workflow/replay.md',
+)
 
-### 2.8 Agent 桥接层收敛
+result = agent.run_sync(max_steps=10)
+```
 
-核心文件：
-- [`browser_use/agent/service.py`](browser_use/agent/service.py)
+### 6.3 react 模式（默认）
 
-完成内容：
-- [`Agent.run()`](browser_use/agent/service.py) 的 `record/replay` 已正式委托 [`WorkflowRuntime`](browser_use/workflow_dsl/runtime.py)
-- 已删除旧桥接逻辑：
-  - `_execute_record_workflow_batch()`
-  - `_build_planner_agent_output()`
-  - 旧的“事后从 AgentHistory 编译 DSL”路径
-- Agent 侧正式暴露：
-  - [`workflow_record_summary`](browser_use/agent/service.py)
-  - [`workflow_artifacts`](browser_use/agent/service.py)
-- [`Agent.run()`](browser_use/agent/service.py) / [`Agent.run_sync()`](browser_use/agent/service.py:3936) 在 workflow mode 下已不再把结果强行包装回旧 [`AgentHistoryList`](browser_use/agent/views.py)
-- [`register_done_callback`](browser_use/agent/service.py) 在 workflow mode 下接收 workflow-native payload，而不是固定旧 history
+```python
+agent = Agent(
+    task='打开 https://www.baidu.com ，搜索张雪峰',
+    llm=ChatOpenAI(model='gpt-4.1-mini'),
+)
 
-意义：
-- workflow mode 的真实执行主干已经从旧 Agent 逻辑中抽离出来。
-- Agent 外层接口开始与 workflow-native 结果边界对齐，而不是继续被旧 history 语义绑住。
+result = agent.run_sync(max_steps=10)
+# 返回 AgentHistoryList（与原始 browser-use 兼容）
+```
 
 ---
 
-## 3. 当前实现后的整体架构
+## 7. 验收脚本
 
-当前主链可概括为：
+```bash
+python tests/test_readme_acceptance.py
+```
 
-1. **record 模式**
-   - [`Agent.run()`](browser_use/agent/service.py)
-   - -> [`WorkflowRuntime.record()`](browser_use/workflow_dsl/runtime.py)
-   - -> [`WorkflowPlanner`](browser_use/workflow_dsl/planner.py) 读取最新页面快照并生成 step DSL
-   - -> [`StepExecutor`](browser_use/workflow_dsl/executor.py) 执行 step DSL
-   - -> 失败时通过 [`ExecutionErrorFeedback`](browser_use/workflow_dsl/views.py) + [`WorkflowRepairLoop`](browser_use/workflow_dsl/planner.py) 驱动下一轮修复
-   - -> 最终由 [`WorkflowCompiler`](browser_use/workflow_dsl/compiler.py) 产出 `record_document` 与 `replay_document`
-   - -> 由 [`WorkflowArtifacts`](browser_use/workflow_dsl/views.py) 对外暴露
-
-2. **replay 模式**
-   - [`Agent.run()`](browser_use/agent/service.py)
-   - -> [`WorkflowRuntime.replay()`](browser_use/workflow_dsl/runtime.py)
-   - -> 顺序消费 replay DSL
-   - -> 生成 workflow-native history / artifact
-
-3. **对外结果边界**
-   - `react` 模式：[`Agent.run()`](browser_use/agent/service.py) 仍返回 [`AgentHistoryList`](browser_use/agent/views.py)
-   - workflow mode：[`Agent.run()`](browser_use/agent/service.py) / [`Agent.run_sync()`](browser_use/agent/service.py:3951) 统一返回 [`WorkflowAgentRunResult`](browser_use/workflow_dsl/views.py:148)
-   - 新架构正式结果：
-     - [`WorkflowAgentRunResult`](browser_use/workflow_dsl/views.py:148)
-     - [`agent.workflow_artifacts`](browser_use/agent/service.py)
-     - [`agent.workflow_record_summary`](browser_use/agent/service.py)
+验收项：
+1. **record 模式**：React 主链路执行 + 自动产出 bundle（record.md / replay.md / history.json / manifest.json）
+2. **replay 模式**：消费 replay.md 并成功回放
+3. **react 模式**：标准 Agent 执行，返回 AgentHistoryList
 
 ---
 
-## 4. 当前仍存在的问题
+## 8. TODO：后续优化计划
 
-### 4.1 P0 仍未完全收尾
+### 8.1 P0：逐步删除 workflow-dsl 旧 record 侧代码
 
-#### 4.1.1 Executor 的页面变化检测仍然不够强
-当前 [`StepExecutor`](browser_use/workflow_dsl/executor.py) 还没有真正做：
-- before / after browser state 对比
-- URL / title / DOM 关键区域变化检测
-- click 后页面是否推进的明确验证
+- [ ] 删除 [`WorkflowPlanner`](browser_use/workflow_dsl/planner.py)（record 已不需要独立 planner）
+- [ ] 删除 [`WorkflowRuntime.record()`](browser_use/workflow_dsl/runtime.py)（record 已由 Agent 主链路处理）
+- [ ] 删除 [`browser_use/workflow_dsl/planner_engine.py`](browser_use/workflow_dsl/planner_engine.py)
+- [ ] 精简 [`browser_use/workflow_dsl/events.py`](browser_use/workflow_dsl/events.py) 中仅 record 使用的事件
+- [ ] 清理 [`browser_use/workflow_dsl/__init__.py`](browser_use/workflow_dsl/__init__.py) 的旧导出
 
-这会导致：
-- record 主链虽然能靠下一轮最新页面快照继续修正
-- 但某些 **假成功 step** 仍有机会被记入 `successful_steps`
-- 最终可能污染 replay 资产
+### 8.2 P1：replay 改造
 
-#### 4.1.2 失败采样仍然偏弱
-当前失败反馈 [`ExecutionErrorFeedback`](browser_use/workflow_dsl/views.py) 已有结构，但采样内容还不够丰富：
-- 主要还是 `URL + Title`
-- 缺少关键 DOM 摘要
-- 缺少 before/after state 差异
-- 缺少更细的执行上下文
+- [ ] 将 replay 也收敛到 Agent 主链路（目前仍依赖独立 runtime）
+- [ ] replay 时支持"部分回放 + 智能修复"（replay 失败时切回 react 模式继续）
+- [ ] replay 支持运行时变量注入
 
-#### 4.1.3 post-condition validation 还是基础版
-当前只做了最小版校验：
-- input/fill
-- navigate/open
-- output_variable
+### 8.3 P2：录制质量提升
 
-但还缺：
-- click 成功的页面推进判断
-- extract 成功的内容质量判断
-- wait / scroll / select 之类动作的业务后置条件验证
+- [ ] 录制时增加页面变化检测（before/after browser state 对比）
+- [ ] 录制时增加 post-condition validation（click 后页面是否推进）
+- [ ] 录制时增加更丰富的元数据（URL / title / DOM 摘要 / 截图路径）
+- [ ] 支持录制时的步骤合并 / 去重优化
 
----
+### 8.4 P3：产物增强
 
+- [ ] 产物中增加截图时间线
+- [ ] 产物中增加执行耗时统计
+- [ ] 支持从产物中提取可参数化的 workflow template
+- [ ] 支持 workflow 版本管理和 diff
 
----
+### 8.5 P4：整体架构清理
 
-### 4.2 workflow mode 的对话保存仍未完全切到 workflow-native artifacts
-虽然当前已经完成：
-- event
-- log
-- artifact bundle
-
-但“对话保存”这一块，仍然没有专门的 workflow-native conversation artifact。
-当前更多还是沿用旧 Agent 的 conversation/save_conversation 路径。
-
-如果后续要彻底完成 workflow mode 的独立化，这部分还需要继续做。
-
----
-
-## 5. 为什么接下来最值得继续做 P0
-
-从设计文档目标看：
-- 首跑成功率
-- 可沉淀自动化资产
-- 0-token 回放稳定性
-
-真正决定资产质量的，不是 Planner 能不能继续出 step，
-而是 Executor 是否能**严格区分“工具执行过”与“页面真的推进了”**。
-
-所以接下来最重要的是：
-1. 深化页面变化检测
-2. 深化失败采样
-3. 深化 post-condition validation
-
-这是防止“假成功 step 被沉淀进 DSL 资产”的关键。
-
----
-
-## 6. 后续计划
-
-### 6.1 下一阶段优先级（建议继续）
-
-#### P0（优先继续）
-1. 强化 [`StepExecutor`](browser_use/workflow_dsl/executor.py) 的页面变化检测
-   - 采集 action 前后的 browser state
-   - 对 URL / title / DOM 摘要做差异判断
-   - 把变化判断纳入 success 认定
-
-2. 强化失败采样
-   - 失败时采集：
-     - before/after URL
-     - title
-     - DOM 摘要片段
-     - 最近 action result
-     - resolved params
-   - 写入 [`ExecutionErrorFeedback`](browser_use/workflow_dsl/views.py)
-
-3. 强化 post-condition validation
-   - click / input / navigate / extract / scroll 等动作做更细粒度验证
-   - 建立 action-specific validation 策略
-
-#### P1（可继续加强）
-1. workflow-native conversation artifact
-2. workflow-native artifact bundle 中增加更多调试工件
-3. 更完整的 workflow UI / timeline / replay 调试数据
-
-
----
-
-## 7. 当前测试情况
-
-核心测试文件：
-- [`test-workflow.py`](test-workflow.py)
-
-当前已覆盖：
-- parser roundtrip
-- parser file api
-- control-flow parse
-- compiler variable collection
-- record/replay compiler 差异
-- executor control-flow
-- set_variable expression
-- planner context / prompt / repair hint
-- runtime replay
-- runtime record
-- workflow artifacts 暴露
-- [`WorkflowAgentRunResult`](browser_use/workflow_dsl/views.py:148) 统一返回语义
-- MCP 对统一 workflow facade 的格式化适配
-- workflow artifacts bundle 保存
-- workflow-native event 基础验证
-- workflow 结果边界不再退回旧 [`AgentHistoryList`](browser_use/agent/views.py)
-
-已执行通过：
-- [`python test-workflow.py`](test-workflow.py)
-
----
-
-## 8. 总结
-
-当前重构已经完成了从“旧 Agent / ReAct 主导”到“workflow-first 架构主干”的关键跃迁：
-
-- Planner 已在线生成 DSL
-- Repair Loop 已结构化
-- Executor 已接管执行层
-- Compiler 已区分 record/replay
-- Runtime 已统一 record/replay 主数据流
-- Artifacts 已成为正式结果出口
-- workflow-native history / event / log / artifact bundle 已成型
-
-当前最主要未收尾点已经收敛到 Executor 质量层：
-- 页面变化检测
-- 失败采样
-- post-condition validation
-
-这三项完成后，整体实现会更接近 [`DSL_ARCHITECTURE_DESIGN.md`](DSL_ARCHITECTURE_DESIGN.md) 所期待的“执行器验证通过的 DSL 文档，而不是历史日志”。
+- [ ] 当 replay 也收敛到 Agent 后，彻底删除 `browser_use/workflow_dsl/` 目录
+- [ ] DSL 数据模型迁移到 `browser_use/agent/workflow_views.py`
+- [ ] Compiler 迁移到 `browser_use/agent/workflow_compiler.py`
+- [ ] 统一 Agent 返回类型（不再区分 AgentHistoryList 和 WorkflowAgentRunResult）

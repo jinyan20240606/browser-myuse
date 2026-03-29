@@ -1,0 +1,131 @@
+{
+  "task": "打开 https://www.baidu.com ，搜索张雪峰，点击搜索按钮，然后结束任务",
+  "mode": "record",
+  "entries": [
+    {
+      "turn_number": 1,
+      "planned_steps": [
+        {
+          "id": "step_0",
+          "name": null,
+          "comment": null,
+          "action": "navigate",
+          "params": {
+            "url": "https://www.baidu.com"
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "executed_steps": [
+        {
+          "id": "step_0",
+          "name": null,
+          "comment": null,
+          "action": "navigate",
+          "params": {
+            "url": "https://www.baidu.com"
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "outputs": [],
+      "runtime_variables": {},
+      "error": null,
+      "done": false
+    },
+    {
+      "turn_number": 2,
+      "planned_steps": [
+        {
+          "id": "step_1",
+          "name": null,
+          "comment": null,
+          "action": "input",
+          "params": {
+            "index": 12,
+            "text": "张雪峰",
+            "clear": true
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "executed_steps": [
+        {
+          "id": "step_1",
+          "name": null,
+          "comment": null,
+          "action": "input",
+          "params": {
+            "index": 12,
+            "text": "张雪峰",
+            "clear": true
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "outputs": [],
+      "runtime_variables": {},
+      "error": null,
+      "done": false
+    },
+    {
+      "turn_number": 3,
+      "planned_steps": [
+        {
+          "id": "step_2",
+          "name": null,
+          "comment": null,
+          "action": "click",
+          "params": {
+            "index": 431,
+            "coordinate_x": null,
+            "coordinate_y": null
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "executed_steps": [
+        {
+          "id": "step_2",
+          "name": null,
+          "comment": null,
+          "action": "click",
+          "params": {
+            "index": 431,
+            "coordinate_x": null,
+            "coordinate_y": null
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "outputs": [],
+      "runtime_variables": {},
+      "error": null,
+      "done": false
+    }
+  ]
+}

@@ -15,7 +15,16 @@ if TYPE_CHECKING:
 	# 防止循环导入，仅在类型检查时导入 Skill 类型
 	from browser_use.skills.views import Skill
 
-from browser_use.workflow_dsl.views import WorkflowAgentRunResult
+from browser_use.workflow_dsl.compiler import WorkflowCompiler
+from browser_use.workflow_dsl.runtime import WorkflowRuntime
+from browser_use.workflow_dsl.views import (
+	WorkflowAgentRunResult,
+	WorkflowArtifacts,
+	WorkflowHistory,
+	WorkflowHistoryEntry,
+	WorkflowRecordSummary,
+	WorkflowStep,
+)
 
 from dotenv import load_dotenv  # 加载 .env 环境变量文件
 
@@ -435,6 +444,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.workflow_runtime_vars = workflow_runtime_vars or {}
 		self.workflow_record_summary = None
 		self.workflow_artifacts = None
+		self._recorded_steps: list[WorkflowStep] = []
 
 		# Initialize file system and screenshot service
 		# 为每个 Agent 实例创建唯一的临时目录（基于系统临时目录 + Agent ID + 时间戳），用于存储该 Agent 运行过程中产生的临时文件（截图、录屏、对话记录等）”
@@ -1099,8 +1109,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self._current_browser_state_summary = browser_state_summary
 
 			# 阶段 2: 获取模型输出并执行动作（核心：LLM决策 + 浏览器操作）
-			if self.workflow_mode != 'record':
-				await self._get_next_action(browser_state_summary)
+			await self._get_next_action(browser_state_summary)
 			# 执行动作（如点击、输入、导航）
 			await self._execute_actions()
 
@@ -1396,6 +1405,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				metadata,
 				state_message=self._message_manager.last_state_message_text,
 			)
+
+		if self.workflow_mode == 'record' and self.state.last_model_output and self.state.last_result:
+			self._record_workflow_steps()
 
 		# Log step completion summary
 		# 记录步骤完成摘要日志（可视化执行结果）；比如 “步骤 1 执行完成，耗时 2.5 秒，成功执行 click 动作
@@ -2532,57 +2544,29 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				f'🔧 Agent setup: Agent Session ID {self.session_id[-4:]}, Task ID {self.task_id[-4:]}, Browser Session ID {self.browser_session.id[-4:] if self.browser_session else "None"} {"(connecting via CDP)" if (self.browser_session and self.browser_session.cdp_url) else "(launching local browser)"}'
 			)
 			
-			if self.workflow_mode in {'record', 'replay'}:
+			if self.workflow_mode == 'replay':
 				from browser_use.workflow_dsl import WorkflowAgentRunResult, WorkflowRuntime
 				assert self.browser_session is not None
-				self.logger.debug('🌐 Starting browser session for workflow mode...')
+				self.logger.debug('🌐 Starting browser session for workflow replay mode...')
 				await self.browser_session.start()
 				runtime = WorkflowRuntime(
 					tools=self.tools,
 					browser_session=self.browser_session,
-					llm=self.llm if self.workflow_mode == 'record' else None,
+					llm=None,
 					max_planner_steps=self.settings.max_actions_per_step,
 				)
 
-				if self.workflow_mode == 'replay':
-					if not self.workflow_dsl_path:
-						raise ValueError("workflow_dsl_path must be provided when workflow_mode is 'replay'")
-					execution = await runtime.replay(self.workflow_dsl_path, runtime_variables=self.workflow_runtime_vars)
-					self.workflow_artifacts = runtime.last_artifacts
-					workflow_result = WorkflowAgentRunResult(
-						mode='replay',
-						execution=execution,
-						artifacts=self.workflow_artifacts,
-					)
-					if not execution.success and execution.error:
-						self.logger.error(f"Replay failed at step {execution.error.failed_step.id}: {execution.error.error_message}")
-					if self.register_done_callback:
-						if inspect.iscoroutinefunction(self.register_done_callback):
-							await self.register_done_callback(workflow_result)
-						else:
-							self.register_done_callback(workflow_result)
-					return workflow_result
-
-				self.logger.info('Workflow record mode enabled: delegating to WorkflowRuntime.')
-				execution, summary, document = await runtime.record(
-					task=self.task,
-					runtime_variables=self.workflow_runtime_vars,
-					max_turns=max_steps,
-					output_path=self.workflow_dsl_path or (self.agent_directory / 'recorded_workflow.md'),
-					document_id=f'{self.task_id}_workflow',
-					document_name=self.task[:80],
-					start_url=self.initial_url,
-				)
-				self.workflow_record_summary = summary
+				if not self.workflow_dsl_path:
+					raise ValueError("workflow_dsl_path must be provided when workflow_mode is 'replay'")
+				execution = await runtime.replay(self.workflow_dsl_path, runtime_variables=self.workflow_runtime_vars)
 				self.workflow_artifacts = runtime.last_artifacts
 				workflow_result = WorkflowAgentRunResult(
-					mode='record',
+					mode='replay',
 					execution=execution,
 					artifacts=self.workflow_artifacts,
-					record_summary=summary,
 				)
 				if not execution.success and execution.error:
-					self.logger.error(f"Record failed at step {execution.error.failed_step.id}: {execution.error.error_message}")
+					self.logger.error(f"Replay failed at step {execution.error.failed_step.id}: {execution.error.error_message}")
 				if self.register_done_callback:
 					if inspect.iscoroutinefunction(self.register_done_callback):
 						await self.register_done_callback(workflow_result)
@@ -2707,6 +2691,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			if self.history._output_model_schema is None and self.output_model_schema is not None:
 				self.history._output_model_schema = self.output_model_schema
 
+			if self.workflow_mode == 'record':
+				return self._build_record_result(self.history)
+			if self.workflow_mode == 'record':
+				return self._build_record_result(self.history)
 			return self.history
 
 		except KeyboardInterrupt:
@@ -4038,6 +4026,139 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		self.logger.info(f'Substituted {substitution_count} value(s) in {len(value_replacements)} variable type(s) in history')
 		return modified_history
+
+	def _record_workflow_steps(self) -> None:
+		"""在 record 模式下，将当前步骤成功执行的 action 追加为可回放的 WorkflowStep。"""
+		if self.workflow_mode != 'record' or not self.state.last_model_output or not self.state.last_result:
+			return
+
+		actions = self.state.last_model_output.action or []
+		results = self.state.last_result or []
+		for action, result in zip(actions, results, strict=False):
+			if result.error:
+				self.logger.debug(f'📝 Record: 跳过失败动作 (error={result.error[:80]}...)')
+				continue
+			if result.is_done:
+				self.logger.info('📝 Record: 跳过 done 动作（非浏览器动作，不纳入录制产物）')
+				continue
+			action_payload = action.model_dump(exclude_unset=True) if hasattr(action, 'model_dump') else {}
+			if not action_payload:
+				self.logger.debug('📝 Record: 跳过空动作 payload')
+				continue
+			action_name, params = next(iter(action_payload.items()))
+			if not isinstance(params, dict):
+				self.logger.debug(f'📝 Record: 跳过非 dict 参数动作 {action_name}')
+				continue
+			step_id = f'step_{len(self._recorded_steps) + 1}'
+			self._recorded_steps.append(
+				WorkflowStep(
+					id=step_id,
+					action=action_name,
+					params=dict(params),
+				)
+			)
+			self.logger.info(f'📝 Record: 已录制 {step_id} → {action_name}({params})')
+
+	def _build_record_result(self, history: AgentHistoryList) -> WorkflowAgentRunResult:
+		"""基于 React 主链路的 history，编译并保存 record 产物，返回 WorkflowAgentRunResult。"""
+		from browser_use.workflow_dsl.views import WorkflowExecutionResult
+
+		# 补充导航步骤：如果录制步骤里没有navigate动作，且有初始url，则自动补齐（解决initial_actions不计入step的问题）
+		steps_to_record = list(self._recorded_steps)
+		if self.initial_url and not any(step.action in ('navigate', 'open') for step in steps_to_record):
+			steps_to_record.insert(0, WorkflowStep(
+				id='step_0',
+				action='navigate',
+				params={'url': self.initial_url}
+			))
+			self.logger.info(f'📝 Record: 自动补齐导航步骤 → navigate(url={self.initial_url})')
+
+		self.logger.info(f'📝 Record: 共录制 {len(steps_to_record)} 个步骤，开始编译产物...')
+		for i, step in enumerate(steps_to_record):
+			self.logger.info(f'📝 Record:   [{i}] {step.id} → {step.action}({step.params})')
+
+		record_document = WorkflowCompiler.compile(
+			successful_steps=steps_to_record,
+			task=self.task,
+			original_variables=self.workflow_runtime_vars,
+			document_id=f'{self.task_id}_workflow',
+			document_name=self.task[:80],
+			start_url=self.initial_url,
+			mode='record',
+		)
+		replay_document = WorkflowCompiler.compile(
+			successful_steps=steps_to_record,
+			task=self.task,
+			original_variables=self.workflow_runtime_vars,
+			document_id=f'{self.task_id}_workflow',
+			document_name=self.task[:80],
+			start_url=self.initial_url,
+			mode='replay',
+		)
+		history_entries = [
+			WorkflowHistoryEntry(
+				turn_number=index + 1,
+				planned_steps=[step],
+				executed_steps=[step],
+				outputs=[],
+				runtime_variables=dict(self.workflow_runtime_vars),
+				error=None,
+				done=False,
+			)
+			for index, step in enumerate(steps_to_record)
+		]
+		workflow_history = WorkflowHistory(task=self.task, mode='record', entries=history_entries)
+		self.workflow_artifacts = WorkflowArtifacts(
+			record_document=record_document,
+			replay_document=replay_document,
+			history=workflow_history,
+		)
+
+		# 保存产物到磁盘
+		output_path = self.workflow_dsl_path or (self.agent_directory / 'recorded_workflow.md')
+		bundle_dir = Path(output_path).with_suffix('')
+		bundle_dir.mkdir(parents=True, exist_ok=True)
+		record_path = bundle_dir / 'record.md'
+		replay_path = bundle_dir / 'replay.md'
+		history_path = bundle_dir / 'history.json'
+		manifest_path = bundle_dir / 'manifest.json'
+
+		WorkflowCompiler.save(record_document, record_path)
+		WorkflowCompiler.save(replay_document, replay_path)
+		history_path.write_text(workflow_history.model_dump_json(indent=2), encoding='utf-8')
+
+		manifest = {
+			'record_document': str(record_path),
+			'replay_document': str(replay_path),
+			'history': str(history_path),
+		}
+		manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+		self.logger.info(f'💾 Workflow record artifacts 已保存到 bundle: {bundle_dir}')
+
+		self.workflow_record_summary = WorkflowRecordSummary(
+			output_path=str(record_path),
+			step_count=len(record_document.steps),
+			workflow_id=record_document.id,
+			mode='history',
+			start_url=record_document.start_url,
+			replay_step_count=len(replay_document.steps),
+			planner_turns=0,
+		)
+
+		execution = WorkflowExecutionResult(
+			success=history.is_done() or False,
+			completed_steps=len(steps_to_record),
+			total_steps=len(steps_to_record),
+			runtime_variables=dict(self.workflow_runtime_vars),
+			outputs=[],
+		)
+
+		return WorkflowAgentRunResult(
+			mode='record',
+			execution=execution,
+			artifacts=self.workflow_artifacts,
+			record_summary=self.workflow_record_summary,
+		)
 
 	def _substitute_in_dict(self, data: dict, replacements: dict[str, str]) -> int:
 		"""递归替换字典中的值，返回所做的替换计数"""

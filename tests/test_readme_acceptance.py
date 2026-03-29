@@ -3,14 +3,16 @@
 目标：
 - 不使用 fake 环境
 - 直接用真实 `Agent` 跑真实浏览器任务
-- 按 README 中 workflow-first 相关能力，组织成用户视角的验收项
+- 验证 `record/replay/react` 三种模式在当前“record 兼容 React 主链路”实现下的可用性
 
 注意：
 - 这是“手工验收脚本”，不是单元测试
-- 本脚本严格按当前源码中 [`Agent`](browser_use/agent/service.py) 暴露的属性访问：
+- 本脚本按当前源码中 [`Agent`](browser_use/agent/service.py) 暴露的属性访问：
   - `workflow_record_summary`
   - `workflow_artifacts`
-- 如果这些属性在真实运行时访问失败，应视为实现或运行环境存在问题，而不是做兼容回退
+- 当前实现中：
+  - `record` 为 React 主链路执行 + 旁路录制产物
+  - `replay` 仍由 workflow runtime 负责消费 replay DSL
 - 运行前需要：
   1. 已正确配置 `.env`
   2. 本机可正常启动浏览器
@@ -85,7 +87,8 @@ def run_record_acceptance() -> None:
     print('- 浏览器真实启动')
     print('- 任务执行结束')
     print('- 生成 tests/acceptance_record/ 目录')
-    print('- 目录内应包含 record.md / replay.md / history.json / planner_turns.json / manifest.json')
+    print('- 目录内应包含 record.md / replay.md / history.json / manifest.json')
+    print('- record 模式日志应体现 React step 执行链路（而非 planner turn 循环）')
 
 
 def run_replay_acceptance() -> None:
@@ -127,7 +130,7 @@ def run_react_acceptance() -> None:
     print_section('验收项 3：react 模式真实任务测试')
 
     agent = Agent(
-        task='打开 https://example.com ，读取页面标题，任务结束',
+        task='打开 https://www.baidu.com ，搜索张雪峰，点击搜索按钮，然后结束任务',
         llm=build_llm(),
         workflow_mode='react',
     )
@@ -149,17 +152,15 @@ def main() -> None:
     print('本脚本不使用 fake 环境，而是直接调真实 Agent + 真实浏览器 + 真实 LLM。')
     print('建议按顺序执行：')
 
-    print('1. record 模式录制')
+    print('1. record 模式录制（React 主链路 + 录制产物）')
     run_record_acceptance()
-    exit(0)
     print('2. replay 模式回放')
-    run_replay_acceptance()
-    exit(0)
+    # run_replay_acceptance()
     print('3. react 模式普通任务')
-    run_react_acceptance()
+    # run_react_acceptance()
 
-    print_section('验收完成')
-    print('请结合浏览器行为、终端日志、产物目录，人工判断是否达到理想效果。')
+    # print_section('验收完成')
+    # print('请结合浏览器行为、终端日志、产物目录，人工判断是否达到理想效果。')
 
 
 if __name__ == '__main__':

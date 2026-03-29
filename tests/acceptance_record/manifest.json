@@ -1,0 +1,5 @@
+{
+  "record_document": "tests/acceptance_record/record.md",
+  "replay_document": "tests/acceptance_record/replay.md",
+  "history": "tests/acceptance_record/history.json"
+}
