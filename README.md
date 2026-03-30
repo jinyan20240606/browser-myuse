@@ -249,27 +249,40 @@ python tests/test_readme_acceptance.py
 - [x] 精简 [`browser_use/workflow_dsl/events.py`](browser_use/workflow_dsl/events.py) 中仅 record 使用的事件
 - [x] 清理 [`browser_use/workflow_dsl/__init__.py`](browser_use/workflow_dsl/__init__.py) 的旧导出
 
-### 8.2 P1：replay 改造
+### 8.2 P1：replay 改造 【已基本完成】
 
-- [ ] replay 支持运行时变量注入
+- [x] replay 支持运行时变量注入（通过 `workflow_runtime_vars` + `${var}` / `{{var}}` 语法）
+- [x] 录制产物改用稳定 locator（`locator.element_hash/stable_hash/xpath/attributes`）代替 volatile index，解决 index 过期导致回放失败的问题
+- [x] 回放时通过 `_resolve_element_index` 按级联策略（EXACT/STABLE/XPATH/ATTRIBUTE）重建当前会话 index
+- [x] replay 模式启动/退出正常（修复 `_task_start_time` 未初始化导致 `finally` 块异常阻塞退出的 bug）
+- [ ] **replay 失败兜底**：回放失败时可选择性切回 react 模式继续（Agent 接管剩余步骤）
+- [ ] **replay 支持 `extract_data` action**（Playwright query_selector_all + JS filter）
+- [ ] **replay 支持 `http_request` action**（Python httpx 发起 HTTP 请求 + extract_map 路径提取变量）
 
-> 设计原则：record 的旧独立智能规划链路已迁入 Agent 主链路；replay 相关确定性执行能力继续保留在独立 `workflow_dsl` 模块中，以复用为先、避免不必要迁移，保持解耦。
+### 8.3 P1（进行中）：record 控制流支持 【DSL 设计文档已明确，待实现】
 
-### 8.3 P2：录制质量提升
+依据 [DSL_ARCHITECTURE_DESIGN.md §11.2](DSL_ARCHITECTURE_DESIGN.md)，录制阶段目前只能录制线性原子 action，无法产出控制流 DSL（if/loop_for 等）。演进目标：
+
+- [ ] 将 `if/loop_for/loop_until/set_variable` 注册到 Agent Tool Registry（record 模式专用 schema）
+- [ ] record 模式加载专用 system prompt，允许模型输出控制流 action
+- [ ] 控制流 action 执行时委托 `StepExecutor` 处理，结果封装为 `ActionResult` 返回 `multi_act`
+- [ ] Compiler 在沉淀产物时能直接保留控制流结构（而非展开为线性 step）
+
+### 8.4 P3：架构守则
+
+按 [DSL_ARCHITECTURE_DESIGN.md §14](DSL_ARCHITECTURE_DESIGN.md) 的原则，录制阶段执行器最终应与回放阶段统一为同一个 `StepExecutor` 内核：
+
+- [ ] 录制阶段 Agent 输出的每轮 action 批次，通过 ControlFlow Tool 委托给 `StepExecutor` 执行，而非直接调用原子 Tool（解决"录制成功、回放失败"的语义漂移问题）
+
+
+### 8.5 P4：录制质量提升
 
 - [ ] 录制时增加页面变化检测（before/after browser state 对比）
 - [ ] 录制时增加 post-condition validation（click 后页面是否推进）
 - [ ] 录制时增加更丰富的元数据（URL / title / DOM 摘要 / 截图路径）
 - [ ] 支持录制时的步骤合并 / 去重优化
 
-### 8.4 P3：产物增强
-
-- [ ] 产物中增加截图时间线
-- [ ] 产物中增加执行耗时统计
-- [ ] 支持从产物中提取可参数化的 workflow template
-- [ ] 支持 workflow 版本管理和 diff
-
-### 8.5 P4：整体架构清理
+### 8.6 P4：整体架构清理
 
 - [ ] 统一 Agent 返回类型（不再区分 AgentHistoryList 和 WorkflowAgentRunResult）
 - [ ] 优化对外暴露的 API，隐藏内部 DSL 实现细节
