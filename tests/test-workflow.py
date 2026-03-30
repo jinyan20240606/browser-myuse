@@ -3,8 +3,7 @@
 该文件主要覆盖：
 - Parser / Compiler
 - StepExecutor 控制流
-- WorkflowPlanner prompt / history / repair hint
-- WorkflowRuntime record / replay 主链
+- WorkflowRuntime replay 主链
 - workflow-native 结果边界与 MCP 适配
 
 测试风格：
@@ -15,13 +14,11 @@
 
 from pathlib import Path
 
-from browser_use.agent.views import ActionResult, AgentHistoryList
+from browser_use.agent.views import ActionResult
 from browser_use.workflow_dsl import WorkflowCompiler, WorkflowDocument, WorkflowParser, WorkflowStep
-from browser_use.workflow_dsl.events import WorkflowArtifactsSavedEvent
 from browser_use.workflow_dsl.executor import StepExecutor
-from browser_use.workflow_dsl.planner import PlannerStepPlan, WorkflowPlanner
 from browser_use.workflow_dsl.runtime import WorkflowRuntime
-from browser_use.workflow_dsl.views import ExecutionErrorFeedback, WorkflowAgentRunResult, WorkflowArtifacts, WorkflowPlannerTurn
+from browser_use.workflow_dsl.views import ExecutionErrorFeedback, WorkflowAgentRunResult, WorkflowArtifacts
 
 
 class FakeRegistryAction:
@@ -132,36 +129,6 @@ class FakeDomState:
 
     def llm_representation(self):
         return '[1]<button>Submit</button>'
-
-
-class FakeBrowserStateSummary:
-    """模拟 planner.build_context() 使用的 browser state summary。"""
-    url = 'https://example.com'
-    title = 'Example'
-    tabs = []
-    dom_state = FakeDomState()
-
-
-class FakeLLMResponse:
-    """模拟 LLM 返回对象，只有 `completion` 字段。"""
-
-    def __init__(self, completion):
-        self.completion = completion
-
-
-class FakePlannerLLM:
-    """按顺序返回预设 PlannerStepPlan，用于驱动 record 流程。"""
-    provider = 'test'
-    model = 'fake-workflow-planner'
-
-    def __init__(self, plans):
-        self.plans = plans
-        self.calls = 0
-
-    async def ainvoke(self, messages, output_format=None):
-        plan = self.plans[self.calls]
-        self.calls += 1
-        return FakeLLMResponse(plan)
 
 
 def test_parser_and_compiler_roundtrip() -> None:
@@ -344,70 +311,6 @@ def test_step_executor_set_variable_expression() -> None:
     print('\n[测试成功] test_step_executor_set_variable_expression ->', {'variables': variables, 'generated_variables': result.generated_variables})
 
 
-def test_planner_message_generation() -> None:
-    """验证 planner 能基于 context 生成包含 task、actions、history 的 prompt。"""
-
-    planner = WorkflowPlanner(llm=object(), tools=FakeTools(), max_actions_per_step=2)  # type: ignore[arg-type]
-    context = planner.build_context(
-        task='Reply to unread messages',
-        browser_state_summary=FakeBrowserStateSummary(),  # type: ignore[arg-type]
-        runtime_variables={'reply_text': 'hello'},
-        successful_steps=[WorkflowStep(id='step_1', action='click', params={'index': 1})],
-        last_error=None,
-        planner_turns=[],
-        available_file_paths=['results.md'],
-    )
-    messages = planner.build_messages(context)
-
-    assert len(messages) == 2
-    assert 'Workflow Planner' in messages[0].text
-    assert 'Reply to unread messages' in messages[1].text
-    assert 'click' in messages[1].text
-    assert '<planner_history_summary>' in messages[1].text
-
-    print('\n[测试成功] test_planner_message_generation ->', messages)
-
-
-def test_planner_history_and_error_specialization() -> None:
-    """验证 planner 能结合 last_error 与 planner_turn history 生成 repair specialization。"""
-
-    planner = WorkflowPlanner(llm=object(), tools=FakeTools(), max_actions_per_step=2)  # type: ignore[arg-type]
-    error = ExecutionErrorFeedback(
-        failed_step=WorkflowStep(id='failed', action='click', params={'index': 3}),
-        action='click',
-        params={'index': 3},
-        resolved_params={'index': 3},
-        error_type='ExecutionError',
-        error_message='Element not found',
-        page_snapshot='URL: https://example.com',
-        runtime_variables={'reply_text': 'hello'},
-    )
-    error.repair_hint = planner.build_repair_hint(error)
-    context = planner.build_context(
-        task='Reply',
-        browser_state_summary=FakeBrowserStateSummary(),  # type: ignore[arg-type]
-        runtime_variables={'reply_text': 'hello'},
-        successful_steps=[WorkflowStep(id='ok', action='click', params={'index': 1})],
-        last_error=error,
-        planner_turns=[
-            WorkflowPlannerTurn(
-                step_number=1,
-                plan=[WorkflowStep(id='ok', action='click', params={'index': 1})],
-                result_summary='- ok: success',
-                error=None,
-            )
-        ],
-        available_file_paths=[],
-    )
-
-    assert context.last_error is not None
-    assert context.last_error.repair_hint is not None
-    assert 'Re-evaluate current page state' in context.last_error.repair_hint
-    assert '<turn step="1">' in context.planner_history_summary
-
-    print('\n[测试成功] test_planner_history_and_error_specialization ->', {'repair_hint': context.last_error.repair_hint, 'planner_history_summary': context.planner_history_summary})
-
-
 def test_workflow_runtime_replay() -> None:
     """验证 runtime replay 主链可跑通，并能产出 replay history artifacts。"""
 
@@ -431,193 +334,13 @@ def test_workflow_runtime_replay() -> None:
     print(runtime.last_artifacts.model_dump_json(indent=2))
 
 
-def build_record_runtime() -> WorkflowRuntime:
-    """构造一个可稳定结束的 record runtime，供多个测试复用。"""
-
-    llm = FakePlannerLLM(
-        [
-            PlannerStepPlan(
-                thinking='plan first step',
-                evaluation_previous_goal='start',
-                memory='recording',
-                next_goal='click submit',
-                is_done=False,
-                steps=[WorkflowStep(id='step_1', action='click', params={'index': 1})],
-            ),
-            PlannerStepPlan(
-                thinking='finish task',
-                evaluation_previous_goal='success',
-                memory='completed one step',
-                next_goal='done',
-                is_done=True,
-                done_text='Workflow completed',
-                steps=[],
-            ),
-        ]
-    )
-    return WorkflowRuntime(
-        tools=FakeTools(),  # type: ignore[arg-type]
-        browser_session=FakeBrowserSession(),  # type: ignore[arg-type]
-        llm=llm,  # type: ignore[arg-type]
-        max_planner_steps=2,
-    )
-
-
-def test_workflow_runtime_record() -> None:
-    """验证 runtime record 主链、artifact bundle 保存与 event 分发。"""
-
-    runtime = build_record_runtime()
-    result, summary, document = __import__('asyncio').run(
-        runtime.record(
-            task='Record test',
-            runtime_variables={'reply_text': 'hello'},
-            max_turns=3,
-            output_path='tmp_record_workflow.md',
-            document_id='record_doc',
-            document_name='Record Doc',
-        )
-    )
-    try:
-        assert result.success is True
-        assert summary is not None
-        assert document is not None
-        assert summary.mode == 'planner'
-        assert summary.planner_turns == 1
-        assert len(document.steps) == 1
-        assert runtime.last_artifacts is not None
-        assert runtime.last_artifacts.history is not None
-        assert runtime.last_artifacts.record_document is not None
-        assert runtime.last_artifacts.replay_document is not None
-        assert runtime.last_artifacts.history.mode == 'record'
-        assert Path('tmp_record_workflow/manifest.json').exists()
-        assert any(isinstance(event, WorkflowArtifactsSavedEvent) for event in runtime.browser_session.event_bus.events)  # type: ignore[attr-defined]
-
-        print('\n[测试成功] test_workflow_runtime_record ->', {'summary': summary.model_dump() if summary else None, 'record_steps': len(document.steps), 'history_mode': runtime.last_artifacts.history.mode})
-    finally:
-        if Path('tmp_record_workflow').exists():
-            import shutil
-
-            shutil.rmtree('tmp_record_workflow')
-
-
-def test_agent_exposes_workflow_artifacts() -> None:
-    """验证 workflow_artifacts 可以作为 Agent 外露结果被访问。"""
-
-    runtime = build_record_runtime()
-    result, _, _ = __import__('asyncio').run(
-        runtime.record(
-            task='Record test',
-            runtime_variables={'reply_text': 'hello'},
-            max_turns=3,
-            output_path='tmp_agent_record_workflow.md',
-            document_id='record_doc',
-            document_name='Record Doc',
-        )
-    )
-    try:
-        class FakeAgent:
-            workflow_artifacts = runtime.last_artifacts
-
-        agent = FakeAgent()
-        assert agent.workflow_artifacts is not None
-        assert agent.workflow_artifacts.history is not None
-        assert agent.workflow_artifacts.record_document is not None
-
-        print('\n[测试成功] test_agent_exposes_workflow_artifacts ->', {'has_history': agent.workflow_artifacts.history is not None, 'has_record_document': agent.workflow_artifacts.record_document is not None})
-    finally:
-        if Path('tmp_agent_record_workflow').exists():
-            import shutil
-
-            shutil.rmtree('tmp_agent_record_workflow')
-
-
-def test_planner_step_plan_schema() -> None:
-    """验证 PlannerStepPlan 基础 schema 可实例化并保留 steps 结构。"""
-
-    plan = PlannerStepPlan(
-        thinking='analyze page',
-        evaluation_previous_goal='success',
-        memory='have one unread chat',
-        next_goal='click unread chat',
-        is_done=False,
-        steps=[WorkflowStep(id='step_1', action='click', params={'index': 1})],
-    )
-    assert plan.steps[0].action == 'click'
-    assert plan.is_done is False
-
-    print('\n[测试成功] test_planner_step_plan_schema ->', {'step_action': plan.steps[0].action, 'is_done': plan.is_done})
-
-
-def test_workflow_run_should_not_return_agent_history() -> None:
-    """验证 workflow 结果边界已脱离旧 AgentHistoryList 语义。"""
-
-    runtime = build_record_runtime()
-    result, summary, _ = __import__('asyncio').run(
-        runtime.record(
-            task='Record test',
-            runtime_variables={'reply_text': 'hello'},
-            max_turns=3,
-            output_path=None,
-            document_id='record_doc',
-            document_name='Record Doc',
-        )
-    )
-
-    assert not isinstance(runtime.last_artifacts, AgentHistoryList)
-    assert runtime.last_artifacts is not None
-    assert runtime.last_artifacts.history is not None
-    # 这里故意用 output_path=None，所以 record() 不会保存 bundle，也就不会生成 WorkflowRecordSummary
-    assert summary is None
-    assert result.success is True
-
-    print('\n[测试成功] test_workflow_run_should_not_return_agent_history ->', {'artifacts_type': type(runtime.last_artifacts).__name__, 'summary': summary, 'result_success': result.success})
-
-
-def test_mcp_workflow_result_formatter() -> None:
-    """验证 MCP 已能消费统一 WorkflowAgentRunResult facade。"""
-
-    from browser_use.mcp.server import BrowserUseServer
-
-    runtime = build_record_runtime()
-    execution, summary, _ = __import__('asyncio').run(
-        runtime.record(
-            task='Record test',
-            runtime_variables={'reply_text': 'hello'},
-            max_turns=3,
-            output_path=None,
-            document_id='record_doc',
-            document_name='Record Doc',
-        )
-    )
-
-    server = BrowserUseServer.__new__(BrowserUseServer)
-    artifacts = runtime.last_artifacts
-    assert isinstance(artifacts, WorkflowArtifacts)
-    workflow_result = WorkflowAgentRunResult(
-        mode='record',
-        execution=execution,
-        artifacts=artifacts,
-        record_summary=summary,
-    )
-
-    lines = BrowserUseServer._format_workflow_run_result(server, workflow_result)
-
-    assert any('Workflow completed in' in line for line in lines)
-    assert any('Workflow mode: record' in line for line in lines)
-    assert any('Record steps:' in line for line in lines)
-
-    print('\n[测试成功] test_mcp_workflow_result_formatter ->', {'workflow_result': workflow_result.model_dump(), 'formatted_lines': lines})
 
 
 if __name__ == '__main__':
     # 1) Parser / Compiler：验证 DSL 文档构造、解析、roundtrip、变量收集、record/replay 编译差异
     test_parser_and_compiler_roundtrip()
-    # exit()  # ✅ 也能用
-
     test_parser_file_api()
-    # exit()
     test_parser_supports_control_flow()
-    # exit()
     test_compiler_collects_nested_variables()
     test_compiler_record_mode_keeps_duplicate_steps()
 
@@ -625,18 +348,7 @@ if __name__ == '__main__':
     test_step_executor_supports_control_flow()
     test_step_executor_set_variable_expression()
 
-    # 3) Planner：验证 context、prompt、planner history 与 repair hint specialization
-    test_planner_message_generation()
-    test_planner_history_and_error_specialization()
-    test_planner_step_plan_schema()
-
-    # 4) Runtime：验证 replay / record 主链、artifact bundle 与 event 分发
+    # 3) Runtime：验证 replay 主链
     test_workflow_runtime_replay()
-    test_workflow_runtime_record()
-    test_agent_exposes_workflow_artifacts()
-
-    # 5) 结果边界 / 调用方适配：验证 workflow-native facade 与 MCP formatter
-    test_workflow_run_should_not_return_agent_history()
-    test_mcp_workflow_result_formatter()
 
     print('workflow dsl tests passed')

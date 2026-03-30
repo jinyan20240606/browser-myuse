@@ -39,8 +39,103 @@ class StepExecutor:
 
         return await self._execute_action_step(step, variables)
 
+    async def _resolve_element_index(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Resolve stable locators (element_hash/stable_hash/xpath/attributes) to current page index.
+
+        When the DSL was recorded, volatile DOM indices were replaced with stable locators
+        inside a 'locator' object.
+        At replay time this method resolves the correct index from the live selector map using
+        the same cascading matching strategy as `_update_action_indices` in Agent service.
+
+        The locator keys are stripped from the params before the action is dispatched.
+        """
+        if 'locator' not in params or not isinstance(params['locator'], dict):
+            return params
+
+        locator = params['locator']
+        try:
+            state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
+        except Exception:
+            # If we can't get DOM state, just strip the locator keys and use whatever index is there
+            return {k: v for k, v in params.items() if k != 'locator'}
+
+        selector_map = (state.dom_state.selector_map or {}) if state and state.dom_state else {}
+        element_hash = locator.get('element_hash')
+        stable_hash = locator.get('stable_hash')
+        xpath = locator.get('xpath')
+        attributes: dict[str, str] = locator.get('attributes') or {}
+        resolved_index: int | None = None
+        match_level: str | None = None
+
+        logger.debug(
+            f'🔍 Resolving DSL locator: '
+            f'hash={element_hash} stable_hash={stable_hash} xpath={xpath[-40:] if xpath else None}'
+        )
+
+        # Level 1: EXACT hash match
+        if element_hash is not None:
+            for idx, elem in selector_map.items():
+                if hash(elem) == element_hash:
+                    resolved_index = idx
+                    match_level = 'EXACT'
+                    break
+
+        # Level 2: STABLE hash match (dynamic classes filtered)
+        if resolved_index is None and stable_hash is not None:
+            for idx, elem in selector_map.items():
+                if elem.compute_stable_hash() == stable_hash:
+                    resolved_index = idx
+                    match_level = 'STABLE'
+                    break
+
+        # Level 3: XPATH match
+        if resolved_index is None and xpath:
+            for idx, elem in selector_map.items():
+                if elem.xpath == xpath:
+                    resolved_index = idx
+                    match_level = 'XPATH'
+                    break
+
+        # Level 4: Unique attribute fallback (id, name, aria-label)
+        if resolved_index is None and attributes:
+            for attr_key in ('name', 'id', 'aria-label'):
+                attr_val = attributes.get(attr_key)
+                if not attr_val:
+                    continue
+                # Find exactly one match for the attribute to be safe
+                candidates = [
+                    idx for idx, elem in selector_map.items()
+                    if elem.attributes and elem.attributes.get(attr_key) == attr_val
+                ]
+                if len(candidates) == 1:
+                    resolved_index = candidates[0]
+                    match_level = f'ATTRIBUTE({attr_key})'
+                    break
+
+        # Build clean params (strip all locator metadata)
+        clean_params = {k: v for k, v in params.items() if k != 'locator'}
+        
+        if resolved_index is not None:
+            clean_params['index'] = resolved_index
+            logger.info(f'✅ DSL locator resolved to index {resolved_index} (matched at {match_level} level)')
+        else:
+            logger.error(
+                f'❌ DSL locator failed to resolve element on current page. '
+                f'Tried: EXACT hash → STABLE hash → XPATH → ATTRIBUTE matching. '
+                f'Action may fail or target wrong element.'
+            )
+            # If we completely failed to resolve and there is no fallback index,
+            # we should still try to execute (it will likely fail cleanly with a "missing index" error in Pydantic)
+            
+        return clean_params
+
     async def _execute_action_step(self, step: WorkflowStep, variables: dict[str, Any]) -> StepExecutionResult:
         resolved_params = self._resolve_variables(step.params, variables)
+
+        # If the step carries stable locators, re-resolve the index
+        if 'locator' in resolved_params:
+            resolved_params = await self._resolve_element_index(resolved_params)
+
         max_retries = 1 if step.optional else 3
         last_error: str | None = None
 

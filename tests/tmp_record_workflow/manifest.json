@@ -1,6 +1,0 @@
-{
-  "record_document": "tmp_record_workflow/record.md",
-  "replay_document": "tmp_record_workflow/replay.md",
-  "history": "tmp_record_workflow/history.json",
-  "planner_turns": "tmp_record_workflow/planner_turns.json"
-}

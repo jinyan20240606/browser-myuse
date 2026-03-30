@@ -1,13 +1,24 @@
 # Record / Replay 架构文档
 
+## 0. 核心架构原则
+
+本项目基于 browser-use 开源项目（浏览器自动化 Agent，架构成熟稳定），在此基础上增加录制回放能力。核心原则如下：
+
+1. **最大程度复用原 React 主链路**：避免重复实现已有能力，减少踩坑风险
+2. **原项目支持的，就复用**：如 Agent 推理、MessageManager、multi_act、history 记录等
+3. **原项目不支持的，在 `workflow_dsl/` 独立扩展**：如控制流 action（loop/if/set_variable）、DSL 解析器、产物编译器、回放执行引擎
+4. **避免侵入原始代码**：新增能力通过旁路（旁路 Recorder）或独立模块实现，不破坏 React 主链路稳定性
+
+---
+
 ## 1. 当前架构（React + Recorder）
 
 当前实现已从旧的独立 `workflow-dsl` 架构切换为 **React 主链路兼容录制**：
 
 - `record` 模式不再走独立的 Planner / Executor / Runtime
 - `record` = React 原生推理 + 旁路 Recorder
-- `replay` 暂保留对 `WorkflowRuntime.replay()` 的消费能力
-- 未来目标：逐步删除 `browser_use/workflow_dsl/` 目录
+- `replay` 保留对 `WorkflowRuntime.replay()` 的消费能力，由 `StepExecutor` 确定性执行 DSL
+- 未来目标：Agent 承担 replay 编排与兜底，`workflow_dsl/` 中的解析/执行/编译/控制流等能力继续作为独立引擎被复用
 
 ---
 
@@ -101,14 +112,26 @@ steps:
   url: https://www.baidu.com
 - id: step_1
   action: input
-  index: 12
   text: 张雪峰
   clear: true
+  locator:
+    element_hash: 114676202747150647
+    stable_hash: 17869200503948011978
+    xpath: html/body/div[1]/div[2]/div[3]/div/.../textarea
+    attributes:
+      id: chat-textarea
 - id: step_2
   action: click
-  index: 367
+  locator:
+    element_hash: 4146854060744292804
+    stable_hash: 4146854060744292804
+    xpath: html/body/div[1]/div[2]/div[3]/div/.../button
+    attributes:
+      id: chat-submit-button
 ---
 ```
+
+> 注意：录制产物不再保存 volatile `index`，改为使用嵌套的 `locator` 字段存储稳定定位信息。回放引擎在执行时会根据 `locator` 在当前页面重建实时 index。
 
 ---
 
@@ -218,19 +241,19 @@ python tests/test_readme_acceptance.py
 
 ## 8. TODO：后续优化计划
 
-### 8.1 P0：逐步删除 workflow-dsl 旧 record 侧代码
+### 8.1 P0：逐步删除 workflow-dsl 旧 record 侧代码 【已完成】
 
-- [ ] 删除 [`WorkflowPlanner`](browser_use/workflow_dsl/planner.py)（record 已不需要独立 planner）
-- [ ] 删除 [`WorkflowRuntime.record()`](browser_use/workflow_dsl/runtime.py)（record 已由 Agent 主链路处理）
-- [ ] 删除 [`browser_use/workflow_dsl/planner_engine.py`](browser_use/workflow_dsl/planner_engine.py)
-- [ ] 精简 [`browser_use/workflow_dsl/events.py`](browser_use/workflow_dsl/events.py) 中仅 record 使用的事件
-- [ ] 清理 [`browser_use/workflow_dsl/__init__.py`](browser_use/workflow_dsl/__init__.py) 的旧导出
+- [x] 删除 [`WorkflowPlanner`](browser_use/workflow_dsl/planner.py)（record 已不需要独立 planner）
+- [x] 删除 [`WorkflowRuntime.record()`](browser_use/workflow_dsl/runtime.py)（record 已由 Agent 主链路处理）
+- [x] 删除 [`browser_use/workflow_dsl/planner_engine.py`](browser_use/workflow_dsl/planner_engine.py)（当前仓库中已不存在）
+- [x] 精简 [`browser_use/workflow_dsl/events.py`](browser_use/workflow_dsl/events.py) 中仅 record 使用的事件
+- [x] 清理 [`browser_use/workflow_dsl/__init__.py`](browser_use/workflow_dsl/__init__.py) 的旧导出
 
 ### 8.2 P1：replay 改造
 
-- [ ] 将 replay 也收敛到 Agent 主链路（目前仍依赖独立 runtime）
-- [ ] replay 时支持"部分回放 + 智能修复"（replay 失败时切回 react 模式继续）
 - [ ] replay 支持运行时变量注入
+
+> 设计原则：record 的旧独立智能规划链路已迁入 Agent 主链路；replay 相关确定性执行能力继续保留在独立 `workflow_dsl` 模块中，以复用为先、避免不必要迁移，保持解耦。
 
 ### 8.3 P2：录制质量提升
 
@@ -248,7 +271,5 @@ python tests/test_readme_acceptance.py
 
 ### 8.5 P4：整体架构清理
 
-- [ ] 当 replay 也收敛到 Agent 后，彻底删除 `browser_use/workflow_dsl/` 目录
-- [ ] DSL 数据模型迁移到 `browser_use/agent/workflow_views.py`
-- [ ] Compiler 迁移到 `browser_use/agent/workflow_compiler.py`
 - [ ] 统一 Agent 返回类型（不再区分 AgentHistoryList 和 WorkflowAgentRunResult）
+- [ ] 优化对外暴露的 API，隐藏内部 DSL 实现细节

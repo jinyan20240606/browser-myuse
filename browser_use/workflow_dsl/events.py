@@ -18,16 +18,6 @@ class WorkflowEventBase(BaseModel):
     task: str
 
 
-class WorkflowPlannerTurnEvent(WorkflowEventBase):
-    """Event emitted when a planner turn is created or finished."""
-
-    turn_number: int
-    phase: Literal['started', 'finished']
-    planned_steps: list[WorkflowStep] = Field(default_factory=list)
-    result_summary: str | None = None
-    error: ExecutionErrorFeedback | None = None
-
-
 class WorkflowStepBatchEvent(WorkflowEventBase):
     """Event emitted after a workflow step batch execution."""
 
@@ -42,14 +32,6 @@ class WorkflowRepairEvent(WorkflowEventBase):
 
     turn_number: int
     error: ExecutionErrorFeedback
-
-
-class WorkflowArtifactsSavedEvent(WorkflowEventBase):
-    """Event emitted after workflow artifacts are saved to disk."""
-
-    bundle_dir: str
-    manifest_path: str
-    files: list[str] = Field(default_factory=list)
 
 
 class WorkflowHistoryEvent(WorkflowEventBase):

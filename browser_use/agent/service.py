@@ -2547,13 +2547,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			if self.workflow_mode == 'replay':
 				from browser_use.workflow_dsl import WorkflowAgentRunResult, WorkflowRuntime
 				assert self.browser_session is not None
+				# Initialize timing so finally block's UpdateAgentTaskEvent has required attributes
+				self._session_start_time = time.time()
+				self._task_start_time = self._session_start_time
 				self.logger.debug('🌐 Starting browser session for workflow replay mode...')
 				await self.browser_session.start()
 				runtime = WorkflowRuntime(
 					tools=self.tools,
 					browser_session=self.browser_session,
-					llm=None,
-					max_planner_steps=self.settings.max_actions_per_step,
 				)
 
 				if not self.workflow_dsl_path:
@@ -4034,7 +4035,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		actions = self.state.last_model_output.action or []
 		results = self.state.last_result or []
-		for action, result in zip(actions, results, strict=False):
+		# Extract interacted elements if available
+		interacted_elements = []
+		if len(self.history.history) > 0 and self.history.history[-1].state and self.history.history[-1].state.interacted_element:
+			interacted_elements = self.history.history[-1].state.interacted_element
+
+		for i, (action, result) in enumerate(zip(actions, results, strict=False)):
 			if result.error:
 				self.logger.debug(f'📝 Record: 跳过失败动作 (error={result.error[:80]}...)')
 				continue
@@ -4049,15 +4055,40 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			if not isinstance(params, dict):
 				self.logger.debug(f'📝 Record: 跳过非 dict 参数动作 {action_name}')
 				continue
+			
+			step_params = dict(params)
+			# Replace volatile index with stable locators if element info is available
+			# The original index is session-scoped and unreliable across sessions;
+			# stable locators allow the replay engine to re-resolve the correct index at runtime.
+			if 'index' in step_params and i < len(interacted_elements) and interacted_elements[i]:
+				elem = interacted_elements[i]
+				# Drop the volatile index; replay engine will reconstruct it from locators
+				step_params.pop('index')
+				locator: dict[str, object] = {'element_hash': elem.element_hash}
+				if elem.stable_hash:
+					locator['stable_hash'] = elem.stable_hash
+				if elem.x_path:
+					locator['xpath'] = elem.x_path
+				if elem.attributes:
+					# Store stable semantic attributes for fallback matching
+					attrs_to_save = {}
+					for k in ['id', 'name', 'aria-label', 'placeholder', 'type']:
+						if elem.attributes.get(k):
+							attrs_to_save[k] = elem.attributes[k]
+					if attrs_to_save:
+						locator['attributes'] = attrs_to_save
+				step_params['locator'] = locator
+				self.logger.info(f'📝 Record: index 替换为 stable locator (hash={elem.element_hash})')
+
 			step_id = f'step_{len(self._recorded_steps) + 1}'
 			self._recorded_steps.append(
 				WorkflowStep(
 					id=step_id,
 					action=action_name,
-					params=dict(params),
+					params=step_params,
 				)
 			)
-			self.logger.info(f'📝 Record: 已录制 {step_id} → {action_name}({params})')
+			self.logger.info(f'📝 Record: 已录制 {step_id} → {action_name}({step_params})')
 
 	def _build_record_result(self, history: AgentHistoryList) -> WorkflowAgentRunResult:
 		"""基于 React 主链路的 history，编译并保存 record 产物，返回 WorkflowAgentRunResult。"""

@@ -50,9 +50,17 @@
           "comment": null,
           "action": "input",
           "params": {
-            "index": 12,
             "text": "张雪峰",
-            "clear": true
+            "clear": true,
+            "locator": {
+              "element_hash": 114676202747150647,
+              "stable_hash": 17869200503948011978,
+              "xpath": "html/body/div[1]/div[2]/div[3]/div/div/div[2]/div/div/div[1]/div/div[1]/div[4]/div[1]/div[2]/textarea",
+              "attributes": {
+                "id": "chat-textarea",
+                "placeholder": "三角洲部队演练夺伊朗核燃料"
+              }
+            }
           },
           "timeout_ms": null,
           "optional": false,
@@ -68,9 +76,17 @@
           "comment": null,
           "action": "input",
           "params": {
-            "index": 12,
             "text": "张雪峰",
-            "clear": true
+            "clear": true,
+            "locator": {
+              "element_hash": 114676202747150647,
+              "stable_hash": 17869200503948011978,
+              "xpath": "html/body/div[1]/div[2]/div[3]/div/div/div[2]/div/div/div[1]/div/div[1]/div[4]/div[1]/div[2]/textarea",
+              "attributes": {
+                "id": "chat-textarea",
+                "placeholder": "三角洲部队演练夺伊朗核燃料"
+              }
+            }
           },
           "timeout_ms": null,
           "optional": false,
@@ -93,9 +109,16 @@
           "comment": null,
           "action": "click",
           "params": {
-            "index": 431,
             "coordinate_x": null,
-            "coordinate_y": null
+            "coordinate_y": null,
+            "locator": {
+              "element_hash": 4146854060744292804,
+              "stable_hash": 4146854060744292804,
+              "xpath": "html/body/div[1]/div[2]/div[3]/div/div/div[2]/div/div/div[1]/div/div[1]/div[4]/div[1]/div[3]/div[3]/button",
+              "attributes": {
+                "id": "chat-submit-button"
+              }
+            }
           },
           "timeout_ms": null,
           "optional": false,
@@ -111,9 +134,16 @@
           "comment": null,
           "action": "click",
           "params": {
-            "index": 431,
             "coordinate_x": null,
-            "coordinate_y": null
+            "coordinate_y": null,
+            "locator": {
+              "element_hash": 4146854060744292804,
+              "stable_hash": 4146854060744292804,
+              "xpath": "html/body/div[1]/div[2]/div[3]/div/div/div[2]/div/div/div[1]/div/div[1]/div[4]/div[1]/div[3]/div[3]/button",
+              "attributes": {
+                "id": "chat-submit-button"
+              }
+            }
           },
           "timeout_ms": null,
           "optional": false,

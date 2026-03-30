@@ -82,30 +82,6 @@ class WorkflowExecutionResult(BaseModel):
     outputs: list[Any] = Field(default_factory=list)
 
 
-class WorkflowPlannerContext(BaseModel):
-    """Planner-specific structured context for one planning iteration."""
-
-    task: str
-    current_url: str
-    page_title: str
-    available_actions: list[dict[str, Any]] = Field(default_factory=list)
-    runtime_variables: dict[str, Any] = Field(default_factory=dict)
-    recent_successful_steps: list[WorkflowStep] = Field(default_factory=list)
-    last_error: ExecutionErrorFeedback | None = None
-    browser_state_summary: str = ''
-    planner_history_summary: str = ''
-    available_file_paths: list[str] = Field(default_factory=list)
-
-
-class WorkflowPlannerTurn(BaseModel):
-    """Persistent planner turn record used for record-mode summarization."""
-
-    step_number: int
-    plan: list[WorkflowStep] = Field(default_factory=list)
-    result_summary: str = ''
-    error: ExecutionErrorFeedback | None = None
-
-
 class WorkflowHistoryEntry(BaseModel):
     """Workflow-native execution history entry independent from AgentHistory."""
 
