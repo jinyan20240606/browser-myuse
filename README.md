@@ -255,24 +255,16 @@ python tests/test_readme_acceptance.py
 - [x] 录制产物改用稳定 locator（`locator.element_hash/stable_hash/xpath/attributes`）代替 volatile index，解决 index 过期导致回放失败的问题
 - [x] 回放时通过 `_resolve_element_index` 按级联策略（EXACT/STABLE/XPATH/ATTRIBUTE）重建当前会话 index
 - [x] replay 模式启动/退出正常（修复 `_task_start_time` 未初始化导致 `finally` 块异常阻塞退出的 bug）
-- [ ] **replay 失败兜底**：回放失败时可选择性切回 react 模式继续（Agent 接管剩余步骤）
-- [ ] **replay 支持 `extract_data` action**（Playwright query_selector_all + JS filter）
-- [ ] **replay 支持 `http_request` action**（Python httpx 发起 HTTP 请求 + extract_map 路径提取变量）
 
 ### 8.3 P1（进行中）：record 控制流支持 【DSL 设计文档已明确，待实现】
 
 依据 [DSL_ARCHITECTURE_DESIGN.md §11.2](DSL_ARCHITECTURE_DESIGN.md)，录制阶段目前只能录制线性原子 action，无法产出控制流 DSL（if/loop_for 等）。演进目标：
 
-- [ ] 将 `if/loop_for/loop_until/set_variable` 注册到 Agent Tool Registry（record 模式专用 schema）
-- [ ] record 模式加载专用 system prompt，允许模型输出控制流 action
-- [ ] 控制流 action 执行时委托 `StepExecutor` 处理，结果封装为 `ActionResult` 返回 `multi_act`
-- [ ] Compiler 在沉淀产物时能直接保留控制流结构（而非展开为线性 step）
-
 ### 8.4 P3：架构守则
 
-按 [DSL_ARCHITECTURE_DESIGN.md §14](DSL_ARCHITECTURE_DESIGN.md) 的原则，录制阶段执行器最终应与回放阶段统一为同一个 `StepExecutor` 内核：
+按 [DSL_ARCHITECTURE_DESIGN.md §15](DSL_ARCHITECTURE_DESIGN.md) 的原则，录制阶段执行器最终应与回放阶段统一为同一个 `StepExecutor` 内核：
 
-- [ ] 录制阶段 Agent 输出的每轮 action 批次，通过 ControlFlow Tool 委托给 `StepExecutor` 执行，而非直接调用原子 Tool（解决"录制成功、回放失败"的语义漂移问题）
+- [ ] 录制阶段 Agent 输出的每轮 action 批次，通过统一的 Tool 委托给 `StepExecutor` 执行，而非直接调用原子 Tool（解决"录制成功、回放失败"的语义漂移问题，确保变量解析、重试机制等在两阶段完全一致）
 
 
 ### 8.5 P4：录制质量提升
