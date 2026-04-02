@@ -28,6 +28,8 @@
 
 ## 2. 核心设计原则
 
+> **术语统一声明**：本文档中出现的 `Tools 注册服务`、`Agent Tool Registry`、`Tool Registry` 均指代同一对象，即系统原生的 `Tools` 注册机制（通过 `@tools.action` 注册）。后续统一称为 **Tools 注册服务**。
+
 ### 2.1 DSL 是 Tool Schema 的持久化表达
 
 **Workflow Step DSL 不是自由语言，而是对 AI 暴露的 tool/action schema 的持久化格式。**
@@ -45,7 +47,7 @@
 
 系统应明确区分两个阶段：
 
-- **录制阶段**：AI 根据任务、页面快照、历史执行结果，直接输出可执行的 `Step DSL（允许控制流）`，DSL 立即由 StepExecutor 执行。执行成功则沉淀；失败则将错误和页面状态反馈给 AI，重新生成 DSL，再次执行，直到成功。**始终以 DSL 为唯一执行驱动，而不是事后转换。**
+- **录制阶段**：AI 根据任务、页面快照、历史执行结果，直接输出可执行的 `Step DSL（允许控制流）`，DSL 立即由 StepExecutor 执行。执行成功则沉淀；失败则将错误和页面状态反馈给 AI，重新生成 DSL，再次执行，直到成功。**始终以 DSL 为唯一执行驱动，而不是事后转换。**（注：Compiler 仅负责将最终跑通的 DSL 序列进行归并、标准化和落盘，不进行任何语义转换）。
 - **回放阶段**：执行引擎直接读取 DSL 文件，按 step 顺序执行，不调用 LLM。
 
 这意味着：录制完成后沉淀的 DSL，是**经过验证的、实际执行成功的 DSL**，天然可回放。
@@ -65,6 +67,10 @@ DSL 的首要目标是：
 系统演进方向应是：
 
 - 某种自动化需求无法表达 → 新增内置 action
+- 所有新增 action 必须通过统一的 **Tools 注册服务**接口进行注册（该封装对大模型具备良好兼容性），不得自行实现注册方法
+  - 参考文档：[`docs/customize/tools/add.mdx`](docs/customize/tools/add.mdx) — 如何通过 `@tools.action(...)` 注册新 action，包含参数说明与浏览器交互示例
+  - 参考文档：[`docs/customize/tools/basics.mdx`](docs/customize/tools/basics.mdx) — Tools 注册基础用法与快速示例
+  - **约束**：同功能 action 必须定义 canonical action（规范名），其余仅作为 alias（内部映射）保留兼容，不同时暴露给模型，避免模型选择不稳定
 - 给 AI 暴露新的 action schema
 - DSL 自然获得新能力
 
@@ -154,9 +160,9 @@ Executor 是“运行层”，不负责规划。
 
 ---
 
-### 4.3 Tool Registry
+### 4.3 Tools 注册服务（Tool Registry）
 
-Tool Registry 仍是能力边界的来源。
+Tools 注册服务仍是能力边界的来源。
 
 职责：
 - 定义系统支持的 action 名（原子 action 和控制流 action）
@@ -164,7 +170,7 @@ Tool Registry 仍是能力边界的来源。
 - 为 `multi_act` 提供执行映射目标
 - 在 record 模式下，动态注入控制流 action 的描述与 schema
 
-因此，Tool Registry 实际上定义了 DSL 的语言边界。控制流 action 通过"描述注册"接入 prompt 感知，执行逻辑则委托给 `StepExecutor`。
+因此，Tools 注册服务实际上定义了 DSL 的语言边界。控制流 action 通过"描述注册"接入 prompt 感知，执行逻辑则委托给 `StepExecutor`。
 
 ---
 
@@ -419,38 +425,29 @@ Step DSL 必须满足以下要求：
 
 | 注册体系 | 职责 | 注册位置 |
 |---------|------|---------|
-| **Agent Tool Registry**（原生） | 原子浏览器动作（click/input/navigate/scroll 等），被 `multi_act` 直接调用，LLM 通过 prompt 暴露这些 schema | 原项目 Tool Registry |
-| **DSL 控制流执行引擎**（新增） | 控制流元件的执行逻辑（if/loop_for/loop_until/set_variable），在 `StepExecutor` 内部处理，不走 Tool Registry 查找表 | `workflow_dsl/executor.py` |
+| **Tools 注册服务**（原生） | 原子浏览器动作（click/input/navigate/scroll 等），被 `multi_act` 直接调用，LLM 通过 prompt 暴露这些 schema | 原项目 Tools 注册服务 |
+| **DSL 控制流执行引擎**（新增） | 控制流元件的执行逻辑（if/loop_for/loop_until/set_variable），在 `StepExecutor` 内部处理，执行逻辑不依赖 Tools 注册服务查找表 | `workflow_dsl/executor.py` |
 
 ### 关键冲突澄清
 
-原 `11. 扩展策略` 中"独立注册到 workflow_dsl"的说法，与 `11.3 Prompt / Schema` 中"注册表驱动 prompt"的说法并不冲突，但指向的是两个不同层次：
+**"注册（描述+schema）"与"执行逻辑"可以分离**。控制流 action 的描述注册到 Tools 注册服务，执行逻辑保留在 `workflow_dsl/` 侧，通过 Tool 的执行委托实现解耦。
 
-1. **控制流 action 注册到 Agent Tool Registry（用于 prompt 生成）**
-   - 将 `if`/`loop_for`/`loop_until`/`set_variable` 也在 Agent Tool Registry 中登记（描述 + schema）。
-   - 这样 prompt 构建时能自动读取这些 action 的说明和参数约束，注入给大模型。
-   - 登记信息可以由 `workflow_dsl/` 侧在 record 模式初始化时动态注入，不硬编码到原 Agent。
-
-2. **控制流 action 执行逻辑留在 `workflow_dsl/executor.py`（用于运行时执行）**
-   - 注册到 Tool Registry 的控制流 action，执行时委托给 `StepExecutor` 处理。
-   - `StepExecutor` 里的控制流逻辑依然与原 Agent 完全隔离，不侵入主干。
-
-总结：**"注册（描述+schema）"与"执行逻辑"可以分离**。控制流 action 的描述注册到 Agent Tool Registry，执行逻辑保留在 `workflow_dsl/` 侧，通过 Tool 的执行委托实现解耦。
+> **统一约束：无论原子 action 还是控制流/扩展 action，其 schema 注册入口必须统一走 Tools 注册服务接口（该封装对大模型具备良好兼容性）；执行逻辑不依赖 Tools 注册服务，但 schema/描述注册必须走 Tools 注册服务。**
 
 ### 扩展推荐路径
 
 1. 识别缺失能力（原子 or 控制流）
 2. 定义其参数 schema 和描述
-3. **原子 action**：直接注册到原 Agent Tool Registry（走原路）
-4. **控制流/扩展 action**：在 `workflow_dsl/` 实现执行逻辑 + 在 record 模式初始化时动态注入到 Agent Tool Registry 描述层
+3. **原子 action**：直接注册到原 Tools 注册服务（走原路）
+4. **控制流/扩展 action**：在 `workflow_dsl/` 实现执行逻辑 + 在 Agent run 开始前动态注入到 Tools 注册服务描述层
 5. DSL 自动获得新表达能力，prompt 也能自动感知
 
 两类能力的归属原则（更新后）：
 | 能力类型 | Schema 注册位置 | 执行逻辑位置 |
 |---------|---------|------|
-| 浏览器原子操作（click/input/navigate/scroll） | 原 Agent Tool Registry | 原 Tool 实现（不变）|
-| 控制流（if/loop_for/loop_until/set_variable） | Agent Tool Registry（record 模式动态注入）| `workflow_dsl/executor.py` 委托执行 |
-| 数据采集（extract_data/http_request） | Agent Tool Registry（record 模式动态注入）| `workflow_dsl/` 独立实现 |
+| 浏览器原子操作（click/input/navigate/scroll） | 原 Tools 注册服务 | 原 Tool 实现（不变）|
+| 控制流（if/loop_for/loop_until/set_variable） | Tools 注册服务（Agent run 前动态注入）| `workflow_dsl/executor.py` 委托执行 |
+| 数据采集（extract_data/http_request） | Tools 注册服务（Agent run 前动态注入）| `workflow_dsl/` 独立实现 |
 
 ---
 
@@ -458,30 +455,22 @@ Step DSL 必须满足以下要求：
 
 参考 `douyin_private_message_reply.md` 这类复杂 DSL，控制流元件是实现工业级回放任务的关键。
 
-### 现状（已实现）
+> **现状（已实现）**：`StepExecutor` 已完整支持 `if` / `loop_for` / `loop_until` / `set_variable` 四种控制流 action，可用于回放阶段立即消费。
 
-`StepExecutor`（位于 [`browser_use/workflow_dsl/executor.py`](browser_use/workflow_dsl/executor.py)）已独立实现以下控制流 action：
+### 最小可用 Action 集（MVP）与扩展清单
 
-| 控制流 Action | 说明 | 关键参数 |
-|------------|------|---------|
-| `if` | 条件分支，支持 truthy/equals/greater_than/not_empty 等运算符 | `variable`, `operator`, `expected`, `then_steps`, `else_steps` |
-| `loop_for` | 遍历列表（含元素句柄列表）| `items`, `item_variable`, `index_variable`, `steps` |
-| `loop_until` | 条件满足前持续循环 | `variable`, `operator`, `expected`, `max_loops`, `loop_interval`, `steps` |
-| `set_variable` | 变量赋值/表达式求值 | `name`, `value`, `expression` |
+- **原子操作**：`click`, `input/fill`, `navigate`, `scroll`, `extract`
+- **控制流**：`if`, `loop_for`, `set_variable`
 
-这些控制流元件**不依赖原 Agent 的 Tool Registry**，是 DSL 引擎层的独立扩展实现。
+**扩展原则（简版）**：新增浏览器原子 action 必须优先复用现有基于 CDP / `cdp_use` 的底层能力或者已有的Tool；功能一致可先复用，命名与参数后续统一。
 
-### 待实现（原项目不支持，需独立扩展）
-
-以下 action 在 `douyin_private_message_reply.md` 中也有出现，需要在 DSL 引擎层单独适配：
-
-| action | 实现思路 | 归属 |
-|--------|---------|------|
-| `extract_data` | 使用 Playwright 的 `query_selector_all` + 自定义 filter_function（JS eval 执行）| DSL 引擎扩展 |
-| `http_request` | Python `httpx` 客户端直接发起 HTTP 请求，解析 `extract_map` 路径提取变量 | DSL 引擎扩展 |
-| `hover` | 复用或扩展 Playwright page.hover() 映射 | 可能原项目已有，确认后直接复用 |
-| `wait_for_selector` | 复用 Playwright page.wait_for_selector() | 可能原项目已有 |
-| `fill` | Playwright page.fill()（`fill` 和 `input` 语义类似，确认原项目 `input` 是否覆盖） | 确认复用或补充 |
+| action | 状态 | 处理方式 |
+|--------|------|---------|
+| `hover` | implemented | 直接复用 `Element.hover()` 并注册 |
+| `fill` | alias | 与已有 `input` tool 功能相同，以 `input` 为 canonical，`fill` 仅作内部映射兼容，**不单独暴露给模型** |
+| `wait_for_selector` | planned | 补充 CDP 轮询能力后再开放 |
+| `extract_data` | planned | 在 DSL 引擎实现（CDP DOM/Runtime 提取） |
+| `http_request` | planned | 在 DSL 引擎实现（`httpx` + `extract_map`） |
 
 ### 控制流的录制态与回放态说明
 
@@ -504,6 +493,7 @@ Step DSL 必须满足以下要求：
 
 1. **统一模型出口**：
    - 扩展 `AgentOutput` 的 `action` 字段，允许将 `if`, `loop_for` 注册为标准的合法 Action。
+   - **作用域约束**：仅在 `workflow_mode=record` 下启用 schema 扩展，默认 react/replay 模式的 schema 完全不变，确保不污染主链路。
    - 大模型对 `action` 语义敏感度高，能天然识别并在规划时主动输出循环与条件判断。
 
 2. **统一执行外壳（复用 `multi_act`）**：
@@ -515,64 +505,55 @@ Step DSL 必须满足以下要求：
    - 当 `multi_act` 执行到 `loop_for` tool 时，内部实例化 `StepExecutor`，由 `StepExecutor` 递归消费这段控制流 DSL。
    - `StepExecutor` 跑完后封装为标准 `ActionResult` 返回给 `multi_act`。
 
-4. **Prompt / Schema 最小侵入融合（最关键）**：
-   - **必须改 Prompt**，但改动应严格限于 `record` 模式专用 system prompt，`react` 模式 prompt 保持不变。
-   - **必须改输出 Schema**，但也仅在 `record` 模式下启用“扩展 action 枚举（含控制流 action）”；`react/replay` 继续使用原子 action schema。
-   - 融合方式：
-     1) 通过 `workflow_mode` 在 [`AgentSettings`](browser_use/agent/views.py:87) 或 step 构建阶段分支加载 prompt 模板；
-     2) 通过 `type_with_custom_actions(...)` 机制动态注入 record 专用 action schema；
-     3) 不改 `multi_act` 外部调用签名，保持主链稳定。
 
-### 11.3 Prompt & Schema 改造细则（稳定性优先）
+## 12. 参考文档与实现支撑
 
-#### A. Prompt 如何改
+基于项目现有的官方文档（`docs/` 目录），以下内容为本 DSL 架构方案的落地提供了直接的实现支撑：
 
-仅在 record 模式下追加规则，但**不手写控制流 action 的说明和参数细节**。统一采用“注册即提示”的机制：
+### 12.1 底层浏览器操作复用（Actor 层）
+- **`docs/customize/actor/basics.mdx` & `all-parameters.mdx`**
+  - **支撑点**：提供了底层 CDP 控制、页面管理、元素交互（`click`, `fill`, `hover`, `focus` 等）的完整 API 参考。
+  - **应用场景**：在实现或复用原子 action（如 `hover`, `fill`, `wait_for_selector`）时，直接调用这些已有的 Actor 方法，确保底层操作的一致性。
 
-- 控制流 action（`if`, `loop_for`, `loop_until`, `set_variable`）作为标准 Action 注册到 Tool Registry
-- 在每轮 prompt 构建时，自动从注册表读取：
-  - action 名称
-  - action 描述
-  - 参数 schema（JSON Schema）
-- prompt 只声明策略规则（何时优先原子动作、何时允许控制流），具体约束由注册表 schema 自动注入
+### 12.2 统一 Action 注册机制（Tools 层）
+- **`docs/customize/tools/add.mdx` & `basics.mdx`**
+  - **支撑点**：明确了通过 `@tools.action(...)` 统一注册新 action 的标准路径，并提供了获取 `BrowserSession` 和 `cdp_client` 的示例。
+  - **应用场景**：落实“所有新增 action 必须通过统一的 Tools 注册服务接口进行注册”的架构约束。
+- **`docs/customize/tools/response.mdx`**
+  - **支撑点**：说明了 `ActionResult` 的封装机制（包含 `extracted_content`, `error`, `is_done` 等）。
+  - **应用场景**：用于 DSL 引擎中 action 执行结果的标准化返回与状态传递。
 
-这样做有三个收益：
-1. **单一真源**：Action 约束以注册表为准，不会出现“prompt 写的规则”和“执行器实际规则”漂移。
-2. **低维护**：新增/变更 action 时无需手改 prompt 文案。
-3. **高稳定**：LLM 每轮看到的 action 说明与运行时校验 schema 完全一致。
+### 12.3 录制阶段的拦截与状态管理（Hooks 层）
+- **`docs/customize/hooks.mdx`**
+  - **支撑点**：提供了 `on_step_start` 和 `on_step_end` 生命周期钩子，允许访问 `agent.state`, `agent.history`, `agent.browser_session` 等核心对象。
+  - **应用场景**：在**录制阶段**，可通过注入 Hook 来拦截 AI 的执行步骤、捕获页面快照、记录执行成功的 action，并在任务完成时触发 DSL 的生成与保存。
 
-补充策略规则（仍保留）：
+### 12.5 复杂数据提取与代码执行（CodeAgent 层）
+- **`docs/customize/code-agent/basics.mdx` & `exporting.mdx`**
+  - **支撑点**：展示了如何动态执行 Python/JS 代码并导出执行会话。
+  - **应用场景**：为 `extract_data` 等需要动态注入和执行 JS 脚本的复杂 action 提供实现参考。
+
+### 12.6 关于系统现有Agent-prompt修改建议
+
+**结论：不需要额外单独硬编码定制庞大的 Prompt 来解释语法。**
+
+借助现有系统成熟的 `Tools` 与 `Agent` 机制（参考 `docs/customize/agent/prompting-guide.mdx`），统一采用“注册即提示”的机制：
+
+- 控制流 action（`if`, `loop_for`, `loop_until`, `set_variable`）作为标准的自定义 action 注册到 Tools 注册服务
+- 系统会自动将这些 action 的描述和参数 schema 转换为大模型标准的 function calling/tool use 格式，作为大模型的可用 action 列表出现
+- 我们**不需要**单独写很长的 prompt 去教大模型怎么写 DSL 语法，只需要在总任务 prompt 中给出策略指引即可
+
+这样做有三个显著收益：
+1. **0 侵入外围**：完全复用现有系统 Agent 的 schema 组装与指令跟随能力。
+2. **单一真源**：Action 约束以注册表 schema 为准，不会出现“prompt 写的规则”和“执行器实际规则”漂移。
+3. **低维护**：新增/变更 action 时无需手改 prompt 文案，LLM 看到的说明与运行时校验 schema 始终一致。
+
+仅需在顶层追加极少量的策略规则（例如）：
 - 优先输出原子 action；只有出现明确模式（重复遍历/条件分支）时才输出控制流
-- 每轮 action 数量受控（例如 `max_actions_per_step`）
-- 控制流必须带安全参数（`max_loops`、`optional`、超时）
+- 控制流必须带安全参数（超时、最大循环次数等）
 
-#### B. Schema 如何改
 
-- **record 专用 schema**：从 Tool Registry 动态聚合 action schema（含控制流 action），不在代码中写死枚举。
-- **react/replay 旧 schema**：继续使用原 schema，不动。
-
-这保证了即使 record 改造出现质量波动，也不会污染默认主链路。
-
-#### C. 与现有 Agent 架构如何融合
-
-- 执行入口仍是 `multi_act`
-- message_manager / history / telemetry / error handling 仍走原逻辑
-- 仅在执行某个控制流 action 时，内部委托 `StepExecutor` 跑子图
-- 返回值仍归一为 `ActionResult`，由 `multi_act` 继续处理
-
-#### D. 稳定性防线（建议必须加）
-
-1. **模式隔离开关**：`workflow_mode=record` 才启用控制流 prompt+schema；`react/replay` 继续原逻辑
-
-**优势**：
-- **0 侵入外围**：Agent 的容错与记忆闭环 100% 被复用。
-- **DSL 即执行**：AI 输出的就是 DSL，执行的就是 DSL，执行成功后沉淀的就是 DSL。
-- **高内聚低耦合**：Agent 负责“要不要循环”，StepExecutor 负责“怎么循环跑”。
-- **最小扰动**：prompt/schema 改动被严格限制在 record 模式，不影响原系统默认稳定性。
-
----
-
-## 12. 与最终目标的对齐关系
+## 13. 与最终目标的对齐关系
 
 本架构直接服务于以下最终目标：
 
@@ -590,7 +571,7 @@ Step DSL 必须满足以下要求：
 
 ---
 
-## 13. 最终结论
+## 14. 最终结论
 
 本次架构改造的核心，是为成熟稳定的自动化 Agent 接入外挂式资产沉淀与执行引擎能力，并最终演进为 **DSL 直接驱动执行** 的统一闭环：
 
@@ -610,15 +591,15 @@ Step DSL 必须满足以下要求：
 
 ---
 
-## 14. 录制与回放共用同一执行引擎的原则（架构守则）
+## 15. 录制与回放共用同一执行引擎的原则（架构守则）
 
-### 14.1 核心结论
+### 15.1 核心结论
 
 **录制阶段和回放阶段必须共用同一个 `StepExecutor` 执行引擎（`browser_use/workflow_dsl/executor.py`）。**
 
 这是整个 DSL 架构最重要的一致性保证。
 
-### 14.2 原因分析
+### 15.2 原因分析
 
 架构设计原则 [2.2 首跑由 AI 驱动，复跑由 DSL 驱动] 强调：
 
@@ -631,7 +612,7 @@ Step DSL 必须满足以下要求：
 - 控制流（`if/loop_for/loop_until/set_variable`）与运行时变量系统在两个阶段的行为不一致
 - 变量解析（`{{var}}` / `${var}`）、重试语义、输出变量提取等细节无法对齐
 
-### 14.3 执行引擎内核必须统一的范围
+### 15.3 执行引擎内核必须统一的范围
 
 以下能力必须在录制和回放两种模式下完全一致：
 
@@ -644,7 +625,7 @@ Step DSL 必须满足以下要求：
 | **结果校验** | `_validate_action_result()` 对 input/navigate 等 action 的结果验证规则 |
 | **输出变量提取** | `_extract_output_variables()` 对 `output_variable` 的提取逻辑 |
 
-### 14.4 两阶段差异仅限于外层编排壳
+### 15.4 两阶段差异仅限于外层编排壳
 
 录制阶段与回放阶段的区别，只应体现在执行器的**外层编排壳**，而不是执行器内部语义：
 
@@ -656,7 +637,7 @@ Step DSL 必须满足以下要求：
 | **失败处理** | 错误注入 MessageManager，LLM 下轮修正 | 构造 `ExecutionErrorFeedback`，终止或跳过 |
 | **成功沉淀** | Recorder 收集成功 step | 不需要 |
 
-### 14.5 架构警示：禁止出现双轨执行路径
+### 15.5 架构警示：禁止出现双轨执行路径
 
 以下模式违反本架构原则，应严格禁止：
 
@@ -666,12 +647,3 @@ Step DSL 必须满足以下要求：
 - 录制与回放使用不同的参数校验 schema 版本
 
 任何"录制成功但回放失败"的 bug，本质上都是违反了本原则。
-
-### 14.6 当前实现现状（v0.x）
-
-当前代码实现状态（截至文档撰写时）：
-
-- **回放侧**：已完整实现 DSL + `StepExecutor` 主路径，通过 `WorkflowRuntime.replay()` 驱动。
-- **录制侧**：处于演进阶段（11.2 P1 目标），尚未完全走 DSL 直接驱动的 `StepExecutor` 路径。
-
-**待完成**：录制阶段 Agent 输出的每轮 action 批次，应通过 ControlFlow Tool 委托给 `StepExecutor` 执行，而非直接调用原子 Tool，以确保录制-回放执行路径完全统一。
