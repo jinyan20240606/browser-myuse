@@ -54,14 +54,15 @@ def print_section(title: str) -> None:
     print(f"\n{'=' * 80}\n{title}\n{'=' * 80}\n")
 
 
-def run_record_acceptance() -> None:
+def run_record_acceptance(selected_task: str) -> None:
     """验收项 1：真实 record 模式是否能产出 workflow artifacts bundle。"""
 
     print_section('验收项 1：record 模式真实录制测试')
     output_path = Path('tests/acceptance_record.md')
+    print(f"[当前测试任务]: {selected_task}\n")
 
     agent = Agent(
-        task='打开 https://www.baidu.com ，搜索张雪峰，点击搜索按钮，然后结束任务',
+        task=selected_task,
         llm=build_llm(),
         workflow_mode='record',
         workflow_dsl_path=output_path,
@@ -147,13 +148,22 @@ def run_react_acceptance() -> None:
 
 def main() -> None:
     """逐项运行 README 功能点的真实场景验收。"""
+        # 测试任务列表，可根据需要切换不同的任务描述
+    tasks = [
+        # 0: 基础任务
+        '打开 https://www.baidu.com ，搜索张雪峰，点击搜索按钮，然后结束任务',
+        # 1: 带有控制流的任务
+        '打开 https://www.baidu.com ，搜索 Python官方，如果搜索结果列表中某一项出现“官方”字样，就点击进去然后结束任务，否则也结束任务',
+        # 2: 循环任务
+        '打开 Hacker News (https://news.ycombinator.com)，提取前 3 个新闻的标题并循环输出，然后结束任务'
+    ]
 
     print_section('README 功能点真实场景验收说明')
     print('本脚本不使用 fake 环境，而是直接调真实 Agent + 真实浏览器 + 真实 LLM。')
     print('建议按顺序执行：')
 
     print('1. record 模式录制（React 主链路 + 录制产物）')
-    run_record_acceptance()
+    run_record_acceptance(tasks[1])
     print('2. replay 模式回放')
     # run_replay_acceptance()
     print('3. react 模式普通任务')

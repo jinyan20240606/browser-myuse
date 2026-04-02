@@ -5,6 +5,7 @@ from .events import WorkflowHistoryEvent, WorkflowRepairEvent, WorkflowStepBatch
 from .executor import StepExecutor
 from .parser import WorkflowParser
 from .replay import ReplayEngine
+from .control_flow_tools import inject_control_flow_actions
 from .runtime import WorkflowRuntime
 from .views import (
     ExecutionErrorFeedback,
@@ -38,4 +39,5 @@ __all__ = [
     'WorkflowRecordSummary',
     'WorkflowAgentRunResult',
     'WorkflowStep',
+    'inject_control_flow_actions',
 ]

@@ -452,6 +452,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# 使用Agent的临时目录初始化截图服务
 		self._set_screenshot_service()
 
+		if self.workflow_mode == 'record':
+			from browser_use.workflow_dsl.control_flow_tools import inject_control_flow_actions
+			inject_control_flow_actions(self.tools, self.workflow_runtime_vars)
+
 		# 设置Action步骤执行的模型-进行初始化：Action setup
 		self._setup_action_models()
 		# 记录 Agent 的版本信息和来源标识（用于溯源、兼容性适配）
@@ -4057,6 +4061,20 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				continue
 			
 			step_params = dict(params)
+			
+			# Extract nested steps fields for control flow actions
+			then_steps_raw = step_params.pop('then_steps', []) or []
+			else_steps_raw = step_params.pop('else_steps', []) or []
+			steps_raw = step_params.pop('steps', []) or []
+
+			# We need to import the converter to transform raw nested steps back into WorkflowStep objects
+			# Since the AI output gives us `list[dict[str, Any]]` directly
+			from browser_use.workflow_dsl.control_flow_tools import _convert_raw_steps
+			
+			then_steps = _convert_raw_steps(then_steps_raw)
+			else_steps = _convert_raw_steps(else_steps_raw)
+			nested_steps = _convert_raw_steps(steps_raw)
+
 			# Replace volatile index with stable locators if element info is available
 			# The original index is session-scoped and unreliable across sessions;
 			# stable locators allow the replay engine to re-resolve the correct index at runtime.
@@ -4086,6 +4104,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					id=step_id,
 					action=action_name,
 					params=step_params,
+					then_steps=then_steps,
+					else_steps=else_steps,
+					steps=nested_steps,
 				)
 			)
 			self.logger.info(f'📝 Record: 已录制 {step_id} → {action_name}({step_params})')
