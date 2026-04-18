@@ -54,6 +54,9 @@ class StepExecutionResult(BaseModel):
     resolved_params: dict[str, Any] = Field(default_factory=dict)
     generated_variables: dict[str, Any] = Field(default_factory=dict)
     skipped: bool = False
+    state_changed: bool = False
+    semantic_success: bool = True
+    debug_trace: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ExecutionErrorFeedback(BaseModel):

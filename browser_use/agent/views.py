@@ -1314,32 +1314,50 @@ class AgentError:
 		Returns:
 			str: 格式化后的错误消息
 		"""
-		message = ''
+		def _trace_excerpt(max_lines: int = 12) -> str:
+			trace_text = traceback.format_exc().strip()
+			if not trace_text or trace_text == 'NoneType: None':
+				return ''
+			trace_lines = trace_text.splitlines()
+			if len(trace_lines) <= max_lines:
+				return trace_text
+			return '\n'.join(trace_lines[:max_lines]) + '\n... [traceback truncated]'
+
 		if isinstance(error, ValidationError):
 			return f'{AgentError.VALIDATION_ERROR}\nDetails: {str(error)}'
 		# 延迟导入以避免在模块级别加载 openai SDK（约 800ms）
 		from openai import RateLimitError
+		from browser_use.llm.exceptions import ModelProviderError
 
 		if isinstance(error, RateLimitError):
 			return AgentError.RATE_LIMIT_ERROR
 
+		if isinstance(error, ModelProviderError):
+			base_message = error.user_facing_message or error.error_summary or error.message
+			if error.dump_file:
+				base_message += f'\n原始响应文件: {error.dump_file}'
+			if include_trace:
+				trace_excerpt = _trace_excerpt()
+				if trace_excerpt:
+					base_message += f'\n堆栈摘要:\n{trace_excerpt}'
+			return base_message
+
 		# 处理来自 llm_use 的 LLM 响应验证错误
 		error_str = str(error)
 		if 'LLM response missing required fields' in error_str or 'Expected format: AgentOutput' in error_str:
-			# 提取主要错误消息，不包含巨大的堆栈追踪
 			lines = error_str.split('\n')
 			main_error = lines[0] if lines else error_str
-
-			# 提供更清晰的错误消息
-			helpful_msg = f'{main_error}\n\n上一个响应的输出结构无效。请遵循所需的输出格式。\n\n'
-
+			helpful_msg = f'{main_error}\n\n上一个响应的输出结构无效。请遵循所需的输出格式。'
 			if include_trace:
-				helpful_msg += f'\n\n完整堆栈追踪:\n{traceback.format_exc()}'
-
+				trace_excerpt = _trace_excerpt()
+				if trace_excerpt:
+					helpful_msg += f'\n堆栈摘要:\n{trace_excerpt}'
 			return helpful_msg
 
 		if include_trace:
-			return f'{str(error)}\n堆栈追踪:\n{traceback.format_exc()}'
+			trace_excerpt = _trace_excerpt()
+			if trace_excerpt:
+				return f'{str(error)}\n堆栈摘要:\n{trace_excerpt}'
 		return f'{str(error)}'
 
 

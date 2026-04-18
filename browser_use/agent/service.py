@@ -2,6 +2,7 @@ import asyncio  # 异步 I/O 支持，用于协程和 async/await
 import gc  # 垃圾回收模块，用于强制回收对象
 import inspect  # 运行时检查工具，用于判断函数是否为协程等
 import json  # JSON 编解码
+import pprint
 import logging  # 日志记录
 import re  # 正则表达式处理
 import tempfile  # 临时文件/目录操作
@@ -92,6 +93,17 @@ from browser_use.utils import (
 )  # 若干工具函数与常量（URL 正则、版本检查、计时装饰器等）
 
 logger = logging.getLogger(__name__)  # 获取模块级 logger，用于记录模块内部日志
+
+
+def _safe_pretty(value: Any, max_length: int = 8000) -> str:
+	"""Pretty-print helper for debug logging with truncation."""
+	try:
+		text = pprint.pformat(value, width=120, compact=False, sort_dicts=False)
+	except Exception:
+		text = str(value)
+	if len(text) > max_length:
+		return text[:max_length] + '\n...<truncated>'
+	return text
 
 
 def log_response(response: AgentOutput, registry=None, logger=None) -> None:
@@ -435,8 +447,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		import time
 
 		timestamp = int(time.time())
-		base_tmp = Path(tempfile.gettempdir())
-		self.agent_directory = base_tmp / f'browser_use_agent_{self.id}_{timestamp}'
+		# 使用项目根目录作为基础路径，而非系统临时目录
+		project_root = Path(__file__).parent.parent.parent
+		self.agent_directory = project_root / f'browser_use_agent_{self.id}_{timestamp}'
 
 		# Workflow DSL state
 		self.workflow_mode = workflow_mode
@@ -511,6 +524,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Check if model is a browser-use fine-tuned model (uses simplified prompts)
 		is_browser_use_model = 'browser-use/' in self.llm.model.lower()
 
+		record_mode_prompt_extension = extend_system_message
+		if self.workflow_mode == 'record' and extend_system_message:
+			record_mode_prompt_extension = (
+				extend_system_message
+				+ '\n[Record Mode Constraint] Do not override no-thinking output, DSL-first generation, failed-fragment repair priority, or the prohibition on shortcut actions.'
+			)
+
 		# Initialize message manager with state
 		# 包含所有动作的初始系统提示 —— 会在每个步骤中更新”，明确了 MessageManager 的初始化目的和系统提示的动态特性
 		# 初始化一个 MessageManager（消息管理器）实例，它会整合任务、系统提示、配置项、状态等核心信息，为后续智能体和大语言模型的交互（如生成提示词、管理对话历史）提供统一的消息管理能力
@@ -523,13 +543,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				max_actions_per_step=self.settings.max_actions_per_step,
 				# 分别用于 “覆盖默认系统提示” 和 “扩展默认系统提示”（灵活定制提示词）
 				override_system_message=override_system_message,
-				extend_system_message=extend_system_message,
+				extend_system_message=record_mode_prompt_extension,
 				# 关联之前的运行模式（思考模式 / 快速模式），适配提示词格式；
 				use_thinking=self.settings.use_thinking,
 				flash_mode=self.settings.flash_mode,
 				# 关联之前识别的模型特征，生成适配 Anthropic 模型 / 浏览器微调模型的提示词；
 				is_anthropic=is_anthropic,
 				is_browser_use_model=is_browser_use_model,
+				workflow_mode=self.workflow_mode,
 			).get_system_message(),
 			# 传入文件系统实例：允许消息管理器访问 / 操作文件（如读取本地文件、保存交互日志）
 			file_system=self.file_system,
@@ -833,7 +854,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Initially only include actions with no filters
 		self.ActionModel = self.tools.registry.create_action_model()
 		# Create output model with the dynamic actions
-		if self.settings.flash_mode:
+		if self.workflow_mode == 'record':
+			self.AgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.ActionModel)
+		elif self.settings.flash_mode:
 			self.AgentOutput = AgentOutput.type_with_custom_actions_flash_mode(self.ActionModel)
 		elif self.settings.use_thinking:
 			self.AgentOutput = AgentOutput.type_with_custom_actions(self.ActionModel)
@@ -842,7 +865,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# used to force the done action when max_steps is reached
 		self.DoneActionModel = self.tools.registry.create_action_model(include_actions=['done'])
-		if self.settings.flash_mode:
+		if self.workflow_mode == 'record':
+			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.DoneActionModel)
+		elif self.settings.flash_mode:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_flash_mode(self.DoneActionModel)
 		elif self.settings.use_thinking:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions(self.DoneActionModel)
@@ -1192,6 +1217,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			sensitive_data=self.sensitive_data,
 			available_file_paths=self.available_file_paths,  # Always pass current available_file_paths
 			unavailable_skills_info=unavailable_skills_info,
+			workflow_mode=self.workflow_mode,
 		)
 
 		await self._force_done_after_last_step(step_info)
@@ -1218,6 +1244,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.logger.debug(
 			f'🤖 Step {self.state.n_steps}: Calling LLM with {len(input_messages)} messages (model: {self.llm.model})...'
 		)
+		from browser_use.agent.llm_debug import LlmDebugRecorder
 
 		# 输入消息就是用户类型的提示词结构大概如下：
 		# 1. 回顾历史（agent_history）
@@ -1614,6 +1641,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# 返回最终的模型输出（要么是有效动作，要么是重试后的动作，要么是安全空动作）
 		return model_output
 
+
 	async def _handle_post_llm_processing(
 		self,
 		browser_state_summary: BrowserStateSummary,
@@ -1922,8 +1950,21 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		kwargs: dict = {'output_format': self.AgentOutput, 'session_id': self.session_id}
 
 		try:
+			from browser_use.agent.llm_debug import LlmDebugRecorder
+			self.logger.info(f'大模型日志：Step {self.state.n_steps}: LLM invoke kwargs:\n{_safe_pretty(kwargs)}')
 			response = await self.llm.ainvoke(input_messages, **kwargs)
 			parsed: AgentOutput = response.completion  # type: ignore[assignment]
+			self.logger.info(f'大模型日志：Step {self.state.n_steps}: LLM parsed completion:\n{_safe_pretty(parsed.model_dump(mode="json") if hasattr(parsed, "model_dump") else parsed)}')
+			debug_path = LlmDebugRecorder.dump_step_context(
+				agent_directory=self.agent_directory,
+				step_number=self.state.n_steps,
+				workflow_mode=self.workflow_mode,
+				model_name=self.llm.model,
+				input_messages=input_messages,
+				invoke_kwargs=kwargs,
+				parsed_output=parsed,
+			)
+			self.logger.info(f'大模型日志：Step {self.state.n_steps}: 完整会话上下文已保存 -> {debug_path}')
 
 			# 还原输出中的短URL为原始URL（保证动作执行时URL有效
 			if urls_replaced:
@@ -3921,7 +3962,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Create new action model with current page's filtered actions
 		self.ActionModel = self.tools.registry.create_action_model(page_url=page_url)
 		# Update output model with the new actions
-		if self.settings.flash_mode:
+		if self.workflow_mode == 'record':
+			self.AgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.ActionModel)
+		elif self.settings.flash_mode:
 			self.AgentOutput = AgentOutput.type_with_custom_actions_flash_mode(self.ActionModel)
 		elif self.settings.use_thinking:
 			self.AgentOutput = AgentOutput.type_with_custom_actions(self.ActionModel)
@@ -3930,7 +3973,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Update done action model too
 		self.DoneActionModel = self.tools.registry.create_action_model(include_actions=['done'], page_url=page_url)
-		if self.settings.flash_mode:
+		if self.workflow_mode == 'record':
+			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.DoneActionModel)
+		elif self.settings.flash_mode:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_flash_mode(self.DoneActionModel)
 		elif self.settings.use_thinking:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions(self.DoneActionModel)

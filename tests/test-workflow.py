@@ -12,7 +12,12 @@
 - 通过 fake tools / fake browser session / fake planner llm 做轻量回归
 """
 
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from browser_use.agent.views import ActionResult
 from browser_use.workflow_dsl import WorkflowCompiler, WorkflowDocument, WorkflowParser, WorkflowStep
@@ -293,6 +298,43 @@ def test_step_executor_supports_control_flow() -> None:
     print('\n[测试成功] test_step_executor_supports_control_flow ->', {'calls': tools.registry.calls, 'success': result.success})
 
 
+def test_step_executor_if_condition_supports_resolved_template_value() -> None:
+    """验证 if.variable 使用已解析模板值时，executor 仍按值判断而不是再次当作变量名查找。"""
+
+    tools = FakeTools()
+    browser_session = FakeBrowserSession()
+    executor = StepExecutor(tools=tools, browser_session=browser_session)  # type: ignore[arg-type]
+    variables = {
+        'search_results': [
+            {'index': 101, 'has_official': True},
+            {'index': 202, 'has_official': False},
+        ]
+    }
+
+    step = WorkflowStep(
+        id='loop_search_results',
+        action='loop_for',
+        params={'items': '{{search_results}}', 'item_variable': 'result', 'index_variable': 'idx'},
+        steps=[
+            WorkflowStep(
+                id='official_branch',
+                action='if',
+                params={'variable': '{{result.has_official}}', 'operator': 'equals', 'expected': True},
+                then_steps=[WorkflowStep(id='click_official', action='click', params={'index': '{{result.index}}'})],
+                else_steps=[WorkflowStep(id='skip_non_official', action='set_variable', params={'name': 'last_skipped', 'value': '{{result.index}}'})],
+            )
+        ],
+    )
+
+    result = __import__('asyncio').run(executor.execute(step, variables))
+
+    assert result.success is True
+    assert tools.registry.calls == [('click', {'index': 101})]
+    assert variables['last_skipped'] == 202
+
+    print('\n[测试成功] test_step_executor_if_condition_supports_resolved_template_value ->', {'calls': tools.registry.calls, 'last_skipped': variables['last_skipped']})
+
+
 def test_step_executor_set_variable_expression() -> None:
     """验证 executor 的 set_variable 支持表达式求值与 generated_variables 回填。"""
 
@@ -309,6 +351,58 @@ def test_step_executor_set_variable_expression() -> None:
     assert result.generated_variables['repliedCount'] == 2
 
     print('\n[测试成功] test_step_executor_set_variable_expression ->', {'variables': variables, 'generated_variables': result.generated_variables})
+
+
+def test_step_executor_loop_for_restores_falsey_previous_values() -> None:
+    """验证 loop_for 结束后会恢复原本为 0 / False 的循环变量，而不是错误删除。"""
+
+    tools = FakeTools()
+    browser_session = FakeBrowserSession()
+    executor = StepExecutor(tools=tools, browser_session=browser_session)  # type: ignore[arg-type]
+    variables = {'item': 0, 'idx': False}
+
+    step = WorkflowStep(
+        id='restore_falsey_loop_vars',
+        action='loop_for',
+        params={'items': [10], 'item_variable': 'item', 'index_variable': 'idx'},
+        steps=[WorkflowStep(id='noop_set', action='set_variable', params={'name': 'seen', 'value': True})],
+    )
+
+    result = __import__('asyncio').run(executor.execute(step, variables))
+
+    assert result.success is True
+    assert variables['item'] == 0
+    assert variables['idx'] is False
+    assert variables['seen'] is True
+
+    print('\n[测试成功] test_step_executor_loop_for_restores_falsey_previous_values ->', {'item': variables['item'], 'idx': variables['idx'], 'seen': variables['seen']})
+
+
+def test_step_executor_loop_until_supports_resolved_template_condition() -> None:
+    """验证 loop_until 条件变量使用已解析模板值时可正确退出循环。"""
+
+    tools = FakeTools()
+    browser_session = FakeBrowserSession()
+    executor = StepExecutor(tools=tools, browser_session=browser_session)  # type: ignore[arg-type]
+    variables = {'status': {'done': False}, 'attempts': 0}
+
+    step = WorkflowStep(
+        id='loop_until_done',
+        action='loop_until',
+        params={'variable': '{{status.done}}', 'operator': 'equals', 'expected': True, 'max_loops': 3},
+        steps=[
+            WorkflowStep(id='increment_attempts', action='set_variable', params={'name': 'attempts', 'expression': 'attempts + 1'}),
+            WorkflowStep(id='mark_done', action='set_variable', params={'name': 'status', 'value': {'done': True}}),
+        ],
+    )
+
+    result = __import__('asyncio').run(executor.execute(step, variables))
+
+    assert result.success is True
+    assert variables['attempts'] == 1
+    assert variables['status']['done'] is True
+
+    print('\n[测试成功] test_step_executor_loop_until_supports_resolved_template_condition ->', {'attempts': variables['attempts'], 'status': variables['status']})
 
 
 def test_workflow_runtime_replay() -> None:

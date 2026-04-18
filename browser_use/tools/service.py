@@ -8,7 +8,7 @@ try:
 	from lmnr import Laminar  # type: ignore
 except ImportError:
 	Laminar = None  # type: ignore
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from browser_use.agent.views import ActionModel, ActionResult
 from browser_use.browser import BrowserSession
@@ -37,13 +37,18 @@ from browser_use.tools.utils import get_click_description
 from browser_use.tools.views import (
 	ClickElementAction,
 	ClickElementActionIndexOnly,
+	ClickTargetAction,
 	CloseTabAction,
 	DoneAction,
+	ElementExistsAction,
 	ExtractAction,
+	GetAttributeAction,
 	GetDropdownOptionsAction,
+	GetTextAction,
 	InputTextAction,
 	NavigateAction,
 	NoParamsAction,
+	QueryElementsAction,
 	ScrollAction,
 	SearchAction,
 	SelectDropdownOptionAction,
@@ -66,6 +71,27 @@ UploadFileEvent.model_rebuild()
 Context = TypeVar('Context')
 
 T = TypeVar('T', bound=BaseModel)
+
+
+class EvaluateAction(BaseModel):
+	code: str = Field(
+		...,
+		description='JavaScript code to execute in the browser context. Best wrapped in IIFE with try/catch.',
+	)
+	output_variable: str | None = Field(
+		default=None,
+		description='Optional workflow DSL variable name to store the evaluation result for later control-flow steps.',
+	)
+
+
+class QueryElementsResult(BaseModel):
+	selector: str
+	count: int
+	elements: list[dict[str, str | int | None | bool]]
+
+
+class ElementLookupError(ValueError):
+	pass
 
 
 def _detect_sensitive_key_name(text: str, sensitive_data: dict[str, str | dict[str, str]] | None) -> str | None:
@@ -100,6 +126,128 @@ def handle_browser_error(e: BrowserError) -> ActionResult:
 		'⚠️ A BrowserError was raised without long_term_memory - always set long_term_memory when raising BrowserError to propagate right messages to LLM.'
 	)
 	raise e
+
+
+def _coerce_output_value(value: object) -> str:
+	if value is None:
+		return 'null'
+	if isinstance(value, str):
+		return value
+	return json.dumps(value, ensure_ascii=False)
+
+
+def _is_element_visible(node: EnhancedDOMTreeNode) -> bool:
+	is_visible = getattr(node, 'is_visible', None)
+	if is_visible is False:
+		return False
+	absolute_position = getattr(node, 'absolute_position', None)
+	if absolute_position is None:
+		return True
+	width = getattr(absolute_position, 'width', None)
+	height = getattr(absolute_position, 'height', None)
+	if width is not None and width <= 0:
+		return False
+	if height is not None and height <= 0:
+		return False
+	return True
+
+
+def _build_element_reference(index: int, node: EnhancedDOMTreeNode) -> dict[str, str | int | None | bool]:
+	attrs = node.attributes or {}
+	return {
+		'index': index,
+		'tag': node.tag_name,
+		'text': node.get_all_children_text(max_depth=3).strip() if hasattr(node, 'get_all_children_text') else '',
+		'id': attrs.get('id'),
+		'name': attrs.get('name'),
+		'aria_label': attrs.get('aria-label'),
+		'placeholder': attrs.get('placeholder'),
+		'role': attrs.get('role'),
+		'class': attrs.get('class'),
+		'xpath': node.xpath,
+		'visible': _is_element_visible(node),
+	}
+
+
+def _selector_tokens(selector: str | None) -> list[str]:
+	if not selector:
+		return []
+	cleaned = selector.strip()
+	if not cleaned:
+		return []
+	tokens = [cleaned]
+	for part in cleaned.replace('>', ' ').replace('.', ' ').replace('#', ' ').replace('[', ' ').replace(']', ' ').split():
+		part = part.strip().strip('"\'')
+		if len(part) >= 2:
+			tokens.append(part)
+	return list(dict.fromkeys(tokens))
+
+
+def _node_match_text(node: EnhancedDOMTreeNode) -> str:
+	attrs = node.attributes or {}
+	parts = [
+		node.tag_name or '',
+		node.xpath or '',
+		attrs.get('id') or '',
+		attrs.get('name') or '',
+		attrs.get('class') or '',
+		attrs.get('role') or '',
+		attrs.get('aria-label') or '',
+		attrs.get('placeholder') or '',
+	]
+	if hasattr(node, 'get_all_children_text'):
+		parts.append(node.get_all_children_text(max_depth=3).strip())
+	return ' '.join(filter(None, parts))
+
+
+def _matches_selector_hint(node: EnhancedDOMTreeNode, selector: str | None) -> bool:
+	tokens = _selector_tokens(selector)
+	if not tokens:
+		return True
+	haystack = _node_match_text(node)
+	return any(token in haystack for token in tokens)
+
+
+def _resolve_base_elements(
+	selector_map: dict[int, EnhancedDOMTreeNode],
+	*,
+	element_variable: str | None,
+	within_selector: str | None,
+	variables: dict[str, object] | None = None,
+) -> list[tuple[int, EnhancedDOMTreeNode]]:
+	if element_variable:
+		if not variables or element_variable not in variables:
+			raise ElementLookupError(f"element_variable '{element_variable}' was not found in runtime variables")
+		value = variables[element_variable]
+		if isinstance(value, dict):
+			index = value.get('index')
+			if isinstance(index, int) and index in selector_map:
+				return [(index, selector_map[index])]
+			raise ElementLookupError(f"element_variable '{element_variable}' does not contain a valid element reference")
+		if isinstance(value, list):
+			resolved: list[tuple[int, EnhancedDOMTreeNode]] = []
+			for item in value:
+				if isinstance(item, dict):
+					index = item.get('index')
+					if isinstance(index, int) and index in selector_map:
+						resolved.append((index, selector_map[index]))
+			if resolved:
+				return resolved
+		if isinstance(value, int) and value in selector_map:
+			return [(value, selector_map[value])]
+		if isinstance(value, str) and value.isdigit() and int(value) in selector_map:
+			index = int(value)
+			return [(index, selector_map[index])]
+		raise ElementLookupError(f"element_variable '{element_variable}' must resolve to an element reference with index")
+
+	if within_selector:
+		matched = []
+		for index, node in selector_map.items():
+			if _matches_selector_hint(node, within_selector):
+				matched.append((index, node))
+		return matched
+
+	return list(selector_map.items())
 
 
 class Tools(Generic[Context]):
@@ -1093,16 +1241,127 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			)
 
 		@self.registry.action(
-			"""Execute browser JavaScript. Best practice: wrap in IIFE (function(){...})() with try-catch for safety. Use ONLY browser APIs (document, window, DOM). NO Node.js APIs (fs, require, process). Example: (function(){try{const el=document.querySelector('#id');return el?el.value:'not found'}catch(e){return 'Error: '+e.message}})() Avoid comments. Use for hover, drag, zoom, custom selectors, extract/filter links, shadow DOM, or analysing page structure. Limit output size.""",
+			'Resolve a stable CSS selector against the current interactive selector map and save matching element references into output_variable. Use for reusable list scanning and selector-driven workflows.',
+			param_model=QueryElementsAction,
 		)
-		async def evaluate(code: str, browser_session: BrowserSession):
+		async def query_elements(params: QueryElementsAction, browser_session: BrowserSession):
+			selector_map = await browser_session.get_selector_map()
+			base_elements = _resolve_base_elements(
+				selector_map,
+				within_selector=params.within_selector,
+				element_variable=None,
+			)
+			matches: list[dict[str, str | int | None | bool]] = []
+			for index, node in base_elements:
+				if not _matches_selector_hint(node, params.selector):
+					continue
+				if params.visible_only and not _is_element_visible(node):
+					continue
+				matches.append(_build_element_reference(index, node))
+			memory = f"Resolved selector '{params.selector}' to {len(matches)} interactive element(s)"
+			return ActionResult(extracted_content=_coerce_output_value(matches), long_term_memory=memory)
+
+		@self.registry.action(
+			'Check whether an element or a descendant matching selector exists. Writes a boolean into output_variable for control-flow use.',
+			param_model=ElementExistsAction,
+		)
+		async def element_exists(params: ElementExistsAction, browser_session: BrowserSession):
+			selector_map = await browser_session.get_selector_map()
+			try:
+				base_elements = _resolve_base_elements(
+					selector_map,
+					element_variable=params.element_variable,
+					within_selector=params.within_selector,
+				)
+			except ElementLookupError as exc:
+				return ActionResult(error=str(exc))
+			exists = False
+			for _, node in base_elements:
+				if params.selector:
+					if _matches_selector_hint(node, params.selector):
+						exists = True
+						break
+				else:
+					exists = True
+					break
+			memory = f'element_exists={exists}'
+			return ActionResult(extracted_content='true' if exists else 'false', long_term_memory=memory)
+
+		@self.registry.action(
+			'Get text content from an element or descendant resolved from a stable selector or element_variable. Writes text into output_variable.',
+			param_model=GetTextAction,
+		)
+		async def get_text(params: GetTextAction, browser_session: BrowserSession):
+			selector_map = await browser_session.get_selector_map()
+			try:
+				base_elements = _resolve_base_elements(
+					selector_map,
+					element_variable=params.element_variable,
+					within_selector=params.within_selector,
+				)
+			except ElementLookupError as exc:
+				return ActionResult(error=str(exc))
+			for _, node in base_elements:
+				if params.selector and not _matches_selector_hint(node, params.selector):
+					continue
+				text = node.get_all_children_text(max_depth=5).strip() if hasattr(node, 'get_all_children_text') else ''
+				return ActionResult(extracted_content=text, long_term_memory=f'Got text length={len(text)}')
+			return ActionResult(extracted_content='', long_term_memory='Got text length=0')
+
+		@self.registry.action(
+			'Get an attribute value from an element or descendant resolved from a stable selector or element_variable. Writes the attribute value into output_variable.',
+			param_model=GetAttributeAction,
+		)
+		async def get_attribute(params: GetAttributeAction, browser_session: BrowserSession):
+			selector_map = await browser_session.get_selector_map()
+			try:
+				base_elements = _resolve_base_elements(
+					selector_map,
+					element_variable=params.element_variable,
+					within_selector=params.within_selector,
+				)
+			except ElementLookupError as exc:
+				return ActionResult(error=str(exc))
+			for _, node in base_elements:
+				if params.selector and not _matches_selector_hint(node, params.selector):
+					continue
+				attrs = node.attributes or {}
+				value = attrs.get(params.name)
+				return ActionResult(extracted_content='' if value is None else str(value), long_term_memory=f"Got attribute '{params.name}'")
+			return ActionResult(extracted_content='', long_term_memory=f"Got attribute '{params.name}'")
+
+		@self.registry.action(
+			'Click an element resolved from a stable selector or element_variable. Prefer this over raw index clicking in replayable workflows.',
+			param_model=ClickTargetAction,
+		)
+		async def click_target(params: ClickTargetAction, browser_session: BrowserSession):
+			selector_map = await browser_session.get_selector_map()
+			try:
+				base_elements = _resolve_base_elements(
+					selector_map,
+					element_variable=params.element_variable,
+					within_selector=params.within_selector,
+				)
+			except ElementLookupError as exc:
+				return ActionResult(error=str(exc))
+			for index, node in base_elements:
+				if params.selector and not _matches_selector_hint(node, params.selector):
+					continue
+				return await self._click_by_index(ClickElementActionIndexOnly(index=index), browser_session)
+			return ActionResult(error='No matching element found for click_target')
+
+		@self.registry.action(
+			"""Execute browser JavaScript. Best practice: wrap in IIFE (function(){...})() with try-catch for safety. Use ONLY browser APIs (document, window, DOM). NO Node.js APIs (fs, require, process). Example: (function(){try{const el=document.querySelector('#id');return el?el.value:'not found'}catch(e){return 'Error: '+e.message}})() Avoid comments. Use for hover, drag, zoom, custom selectors, extract/filter links, shadow DOM, or analysing page structure. Limit output size. Supports optional output_variable so workflow DSL can persist the result for later control-flow steps.""",
+			param_model=EvaluateAction,
+		)
+		async def evaluate(params: EvaluateAction, browser_session: BrowserSession):
 			# Execute JavaScript with proper error handling and promise support
 
 			cdp_session = await browser_session.get_or_create_cdp_session()
 
 			try:
 				# Validate and potentially fix JavaScript code before execution
-				validated_code = self._validate_and_fix_javascript(code)
+				validated_code = self._validate_and_fix_javascript(params.code)
 
 				# Always use awaitPromise=True - it's ignored for non-promises
 				result = await cdp_session.cdp_client.send.Runtime.evaluate(
@@ -1131,7 +1390,7 @@ Validated Code (after quote fixing):
 
 				# Check for wasThrown flag (backup error detection)
 				if result_data.get('wasThrown'):
-					msg = f'JavaScript code: {code} execution failed (wasThrown=true)'
+					msg = f'JavaScript code: {params.code} execution failed (wasThrown=true)'
 					logger.debug(msg)
 					return ActionResult(error=msg)
 
@@ -1198,7 +1457,7 @@ Validated Code (after quote fixing):
 			except Exception as e:
 				# CDP communication or other system errors
 				error_msg = f'Failed to execute JavaScript: {type(e).__name__}: {e}'
-				logger.debug(f'JavaScript code that failed: {code[:200]}...')
+				logger.debug(f'JavaScript code that failed: {params.code[:200]}...')
 				return ActionResult(error=error_msg)
 
 	def _validate_and_fix_javascript(self, code: str) -> str:

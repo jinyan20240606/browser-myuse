@@ -23,12 +23,14 @@ class SystemPrompt:
 		flash_mode: bool = False,
 		is_anthropic: bool = False,
 		is_browser_use_model: bool = False,
+		workflow_mode: Literal['react', 'record', 'replay'] = 'react',
 	):
 		self.max_actions_per_step = max_actions_per_step
 		self.use_thinking = use_thinking
 		self.flash_mode = flash_mode
 		self.is_anthropic = is_anthropic
 		self.is_browser_use_model = is_browser_use_model
+		self.workflow_mode = workflow_mode
 		prompt = ''
 		if override_system_message is not None:
 			prompt = override_system_message
@@ -45,8 +47,10 @@ class SystemPrompt:
 		"""Load the prompt template from the markdown file."""
 		try:
 			# Choose the appropriate template based on model type and mode
+			if self.workflow_mode == 'record':
+				template_filename = 'system_prompt_record.md'
 			# Browser-use models use simplified prompts optimized for fine-tuned models
-			if self.is_browser_use_model:
+			elif self.is_browser_use_model:
 				if self.flash_mode:
 					template_filename = 'system_prompt_browser_use_flash.md'
 				elif self.use_thinking:
@@ -105,6 +109,7 @@ class AgentMessagePrompt:
 		read_state_images: list[dict] | None = None,
 		llm_screenshot_size: tuple[int, int] | None = None,
 		unavailable_skills_info: str | None = None,
+		workflow_mode: Literal['react', 'record', 'replay'] = 'react',
 	):
 		self.browser_state: 'BrowserStateSummary' = browser_state_summary
 		self.file_system: 'FileSystem | None' = file_system
@@ -124,6 +129,7 @@ class AgentMessagePrompt:
 		self.read_state_images = read_state_images or []
 		self.unavailable_skills_info: str | None = unavailable_skills_info
 		self.llm_screenshot_size = llm_screenshot_size
+		self.workflow_mode = workflow_mode
 		assert self.browser_state
 
 	def _extract_page_statistics(self) -> dict[str, int]:
@@ -330,6 +336,18 @@ Available tabs:
 			agent_state += f'<sensitive_data>{self.sensitive_data}</sensitive_data>\n'
 
 		agent_state += f'<step_info>{step_info_description}</step_info>\n'
+		if self.workflow_mode == 'record':
+			agent_state += (
+				'<workflow_record_guidance>'
+				'Current mode is record. Your highest priority is to generate or repair replayable DSL JSON fragments. '
+				'Preserve reusable workflow structure over shortcut completion. '
+				'If the task implies traversal/if-else/until/first-match-stop semantics, keep that logic in actions. '
+				'If previous structured feedback contains failed DSL actions, repair those failed fragments first and preserve successful fragments conceptually. '
+				'Do not bypass a failed workflow fragment with a one-off direct action. '
+				'Use current page evidence only to fill legal action parameters, not to inject hidden semantic conclusions. '
+				'Recovery actions are allowed only to restore a stable page; once stable, return immediately to DSL generation or DSL repair.'
+				'</workflow_record_guidance>\n'
+			)
 		if self.available_file_paths:
 			available_file_paths_text = '\n'.join(self.available_file_paths)
 			agent_state += f'<available_file_paths>{available_file_paths_text}\nUse with absolute paths</available_file_paths>\n'

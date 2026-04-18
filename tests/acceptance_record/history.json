@@ -1,17 +1,18 @@
 {
-  "task": "打开 https://www.baidu.com ，搜索张雪峰，点击搜索按钮，然后结束任务",
+  "task": "打开百度搜索 Python官方，遍历搜索结果，如果某一项出现“官方”字样，就点击第一个符合条件的结果后结束，否则结束任务。",
   "mode": "record",
   "entries": [
     {
       "turn_number": 1,
       "planned_steps": [
         {
-          "id": "step_0",
+          "id": "step_1",
           "name": null,
           "comment": null,
           "action": "navigate",
           "params": {
-            "url": "https://www.baidu.com"
+            "url": "https://www.baidu.com",
+            "new_tab": false
           },
           "timeout_ms": null,
           "optional": false,
@@ -22,12 +23,13 @@
       ],
       "executed_steps": [
         {
-          "id": "step_0",
+          "id": "step_1",
           "name": null,
           "comment": null,
           "action": "navigate",
           "params": {
-            "url": "https://www.baidu.com"
+            "url": "https://www.baidu.com",
+            "new_tab": false
           },
           "timeout_ms": null,
           "optional": false,
@@ -37,7 +39,9 @@
         }
       ],
       "outputs": [],
-      "runtime_variables": {},
+      "runtime_variables": {
+        "foundOfficial": false
+      },
       "error": null,
       "done": false
     },
@@ -45,20 +49,20 @@
       "turn_number": 2,
       "planned_steps": [
         {
-          "id": "step_1",
+          "id": "step_2",
           "name": null,
           "comment": null,
           "action": "input",
           "params": {
-            "text": "张雪峰",
+            "text": "Python官方",
             "clear": true,
             "locator": {
-              "element_hash": 114676202747150647,
-              "stable_hash": 17869200503948011978,
+              "element_hash": 2025892297824970957,
+              "stable_hash": 6137962083670746262,
               "xpath": "html/body/div[1]/div[2]/div[3]/div/div/div[2]/div/div/div[1]/div/div[1]/div[4]/div[1]/div[2]/textarea",
               "attributes": {
                 "id": "chat-textarea",
-                "placeholder": "三角洲部队演练夺伊朗核燃料"
+                "placeholder": "孙颖莎战胜高达晋级4强"
               }
             }
           },
@@ -71,20 +75,20 @@
       ],
       "executed_steps": [
         {
-          "id": "step_1",
+          "id": "step_2",
           "name": null,
           "comment": null,
           "action": "input",
           "params": {
-            "text": "张雪峰",
+            "text": "Python官方",
             "clear": true,
             "locator": {
-              "element_hash": 114676202747150647,
-              "stable_hash": 17869200503948011978,
+              "element_hash": 2025892297824970957,
+              "stable_hash": 6137962083670746262,
               "xpath": "html/body/div[1]/div[2]/div[3]/div/div/div[2]/div/div/div[1]/div/div[1]/div[4]/div[1]/div[2]/textarea",
               "attributes": {
                 "id": "chat-textarea",
-                "placeholder": "三角洲部队演练夺伊朗核燃料"
+                "placeholder": "孙颖莎战胜高达晋级4强"
               }
             }
           },
@@ -96,7 +100,9 @@
         }
       ],
       "outputs": [],
-      "runtime_variables": {},
+      "runtime_variables": {
+        "foundOfficial": false
+      },
       "error": null,
       "done": false
     },
@@ -104,7 +110,7 @@
       "turn_number": 3,
       "planned_steps": [
         {
-          "id": "step_2",
+          "id": "step_3",
           "name": null,
           "comment": null,
           "action": "click",
@@ -129,7 +135,7 @@
       ],
       "executed_steps": [
         {
-          "id": "step_2",
+          "id": "step_3",
           "name": null,
           "comment": null,
           "action": "click",
@@ -153,7 +159,226 @@
         }
       ],
       "outputs": [],
-      "runtime_variables": {},
+      "runtime_variables": {
+        "foundOfficial": false
+      },
+      "error": null,
+      "done": false
+    },
+    {
+      "turn_number": 4,
+      "planned_steps": [
+        {
+          "id": "step_4",
+          "name": null,
+          "comment": null,
+          "action": "wait",
+          "params": {
+            "seconds": 2
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "executed_steps": [
+        {
+          "id": "step_4",
+          "name": null,
+          "comment": null,
+          "action": "wait",
+          "params": {
+            "seconds": 2
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "outputs": [],
+      "runtime_variables": {
+        "foundOfficial": false
+      },
+      "error": null,
+      "done": false
+    },
+    {
+      "turn_number": 5,
+      "planned_steps": [
+        {
+          "id": "step_5",
+          "name": null,
+          "comment": null,
+          "action": "set_variable",
+          "params": {
+            "name": "foundOfficial",
+            "value": false,
+            "expression": null
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "executed_steps": [
+        {
+          "id": "step_5",
+          "name": null,
+          "comment": null,
+          "action": "set_variable",
+          "params": {
+            "name": "foundOfficial",
+            "value": false,
+            "expression": null
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "outputs": [],
+      "runtime_variables": {
+        "foundOfficial": false
+      },
+      "error": null,
+      "done": false
+    },
+    {
+      "turn_number": 6,
+      "planned_steps": [
+        {
+          "id": "step_6",
+          "name": null,
+          "comment": null,
+          "action": "evaluate",
+          "params": {
+            "code": "(function(){try{var items=document.querySelectorAll('#content_left > div');var result=[];for(var i=0;i<items.length;i++){var el=items[i];var text=el.innerText||'';var hasOfficial=text.indexOf('官方')!==-1;result.push({index:i,hasOfficial:hasOfficial})}return JSON.stringify(result)}catch(e){return 'Error: '+e.message}})()",
+            "output_variable": "searchResultsInfo"
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "executed_steps": [
+        {
+          "id": "step_6",
+          "name": null,
+          "comment": null,
+          "action": "evaluate",
+          "params": {
+            "code": "(function(){try{var items=document.querySelectorAll('#content_left > div');var result=[];for(var i=0;i<items.length;i++){var el=items[i];var text=el.innerText||'';var hasOfficial=text.indexOf('官方')!==-1;result.push({index:i,hasOfficial:hasOfficial})}return JSON.stringify(result)}catch(e){return 'Error: '+e.message}})()",
+            "output_variable": "searchResultsInfo"
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "outputs": [],
+      "runtime_variables": {
+        "foundOfficial": false
+      },
+      "error": null,
+      "done": false
+    },
+    {
+      "turn_number": 7,
+      "planned_steps": [
+        {
+          "id": "step_7",
+          "name": null,
+          "comment": null,
+          "action": "set_variable",
+          "params": {
+            "name": "foundOfficial",
+            "value": false,
+            "expression": null
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "executed_steps": [
+        {
+          "id": "step_7",
+          "name": null,
+          "comment": null,
+          "action": "set_variable",
+          "params": {
+            "name": "foundOfficial",
+            "value": false,
+            "expression": null
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "outputs": [],
+      "runtime_variables": {
+        "foundOfficial": false
+      },
+      "error": null,
+      "done": false
+    },
+    {
+      "turn_number": 8,
+      "planned_steps": [
+        {
+          "id": "step_8",
+          "name": null,
+          "comment": null,
+          "action": "evaluate",
+          "params": {
+            "code": "(function(){try{var items=document.querySelectorAll('#content_left > div');for(var i=0;i<items.length;i++){var el=items[i];var text=el.innerText||'';if(text.indexOf('官方')!==-1){var link=el.querySelector('a');if(link){link.click();return 'clicked_index_'+i}}}return 'no_official_found'}catch(e){return 'Error: '+e.message}})()",
+            "output_variable": "clickResult"
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "executed_steps": [
+        {
+          "id": "step_8",
+          "name": null,
+          "comment": null,
+          "action": "evaluate",
+          "params": {
+            "code": "(function(){try{var items=document.querySelectorAll('#content_left > div');for(var i=0;i<items.length;i++){var el=items[i];var text=el.innerText||'';if(text.indexOf('官方')!==-1){var link=el.querySelector('a');if(link){link.click();return 'clicked_index_'+i}}}return 'no_official_found'}catch(e){return 'Error: '+e.message}})()",
+            "output_variable": "clickResult"
+          },
+          "timeout_ms": null,
+          "optional": false,
+          "then_steps": [],
+          "else_steps": [],
+          "steps": []
+        }
+      ],
+      "outputs": [],
+      "runtime_variables": {
+        "foundOfficial": false
+      },
       "error": null,
       "done": false
     }

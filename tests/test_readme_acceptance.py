@@ -70,12 +70,12 @@ def run_record_acceptance(selected_task: str) -> None:
 
     result = agent.run_sync(max_steps=10)
 
-    print('[运行结果]')
-    print(result)
-    print('\n[workflow_record_summary]')
-    print(agent.workflow_record_summary)
-    print('\n[workflow_artifacts]')
-    print(agent.workflow_artifacts)
+    # print('[运行结果]')
+    # print(result)
+    # print('\n[workflow_record_summary]')
+    # print(agent.workflow_record_summary)
+    # print('\n[workflow_artifacts]')
+    # print(agent.workflow_artifacts)
     print('\n[产物目录检查]')
     bundle_dir = output_path.with_suffix('')
     if bundle_dir.exists():
@@ -111,10 +111,10 @@ def run_replay_acceptance() -> None:
 
     result = agent.run_sync(max_steps=10)
 
-    print('[运行结果]')
-    print(result)
-    print('\n[workflow_artifacts]')
-    print(agent.workflow_artifacts)
+    # print('[运行结果]')
+    # print(result)
+    # print('\n[workflow_artifacts]')
+    # print(agent.workflow_artifacts)
     print('\n[replay DSL 文件检查]')
     print(f'回放 DSL 路径: {replay_path}')
     print(f'是否存在: {replay_path.exists()}')
@@ -153,7 +153,7 @@ def main() -> None:
         # 0: 基础任务
         '打开 https://www.baidu.com ，搜索张雪峰，点击搜索按钮，然后结束任务',
         # 1: 带有控制流的任务
-        '打开 https://www.baidu.com ，搜索 Python官方，如果搜索结果列表中某一项出现“官方”字样，就点击进去然后结束任务，否则也结束任务',
+        '打开百度搜索 Python官方，遍历搜索结果，如果某一项出现“官方”字样，就点击第一个符合条件的结果后结束，否则结束任务。',
         # 2: 循环任务
         '打开 Hacker News (https://news.ycombinator.com)，提取前 3 个新闻的标题并循环输出，然后结束任务'
     ]
@@ -165,7 +165,7 @@ def main() -> None:
     print('1. record 模式录制（React 主链路 + 录制产物）')
     run_record_acceptance(tasks[1])
     print('2. replay 模式回放')
-    # run_replay_acceptance()
+    run_replay_acceptance()
     print('3. react 模式普通任务')
     # run_react_acceptance()
 

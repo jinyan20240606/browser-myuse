@@ -90,21 +90,20 @@ class WorkflowParser:
         params: dict[str, Any] = {}
         nested_steps: dict[str, list[WorkflowStep]] = {}
 
+        raw_params = raw_step.get('params')
+        if raw_params is not None:
+            if not isinstance(raw_params, dict):
+                raise ValueError(f"{step_path}.params must be a mapping")
+            params.update(raw_params)
+
         for key, value in raw_step.items():
-            if key == 'action':
-                continue
-            if key in cls.STEP_METADATA_KEYS:
-                metadata[key] = value
+            if key == 'action' or key == 'params':
                 continue
             if key in cls.STEP_NESTED_KEYS:
                 nested_steps[key] = cls._build_nested_steps(key, value, step_path)
                 continue
-            if key == 'params':
-                if value is None:
-                    continue
-                if not isinstance(value, dict):
-                    raise ValueError(f"{step_path}.params must be a mapping")
-                params.update(value)
+            if key in cls.STEP_METADATA_KEYS and key not in params:
+                metadata[key] = value
                 continue
             params[key] = value
 

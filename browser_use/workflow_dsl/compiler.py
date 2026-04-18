@@ -144,7 +144,8 @@ class WorkflowCompiler:
         if step.comment:
             step_dict['comment'] = step.comment
         step_dict['action'] = step.action
-        step_dict.update(step.params)
+        if step.params:
+            step_dict['params'] = dict(step.params)
         if step.timeout_ms is not None:
             step_dict['timeout_ms'] = step.timeout_ms
         if step.optional:

@@ -185,6 +185,7 @@ class MessageManager:
 		model_output: AgentOutput | None = None,
 		result: list[ActionResult] | None = None,
 		step_info: AgentStepInfo | None = None,
+		workflow_mode: Literal['react', 'record', 'replay'] = 'react',
 	) -> None:
 		"""Update the agent history description"""
 
@@ -256,16 +257,33 @@ class MessageManager:
 					self.state.agent_history_items.append(history_item)
 				elif step_number > 0:
 					# Error case for steps > 0
-					history_item = HistoryItem(step_number=step_number, error='Agent failed to output in the right format.')
+					error_message = 'Agent failed to output in the right format.'
+					if result:
+						last_error = next((item.error for item in result if item and item.error), None)
+						if last_error:
+							error_message = last_error
+						history_item = HistoryItem(step_number=step_number, error=error_message)
 					self.state.agent_history_items.append(history_item)
 		else:
-			history_item = HistoryItem(
-				step_number=step_number,
-				evaluation_previous_goal=model_output.current_state.evaluation_previous_goal,
-				memory=model_output.current_state.memory,
-				next_goal=model_output.current_state.next_goal,
-				action_results=action_results,
-			)
+			if workflow_mode == 'record':
+				from browser_use.workflow_dsl.record_feedback import RecordFeedbackBuilder
+				feedback = RecordFeedbackBuilder.build(model_output.action, result)
+				action_results = RecordFeedbackBuilder.format_for_history(feedback)
+				history_item = HistoryItem(
+					step_number=step_number,
+					evaluation_previous_goal=model_output.current_state.evaluation_previous_goal,
+					memory=model_output.current_state.memory,
+					next_goal=model_output.current_state.next_goal,
+					action_results=action_results,
+				)
+			else:
+				history_item = HistoryItem(
+					step_number=step_number,
+					evaluation_previous_goal=model_output.current_state.evaluation_previous_goal,
+					memory=model_output.current_state.memory,
+					next_goal=model_output.current_state.next_goal,
+					action_results=action_results,
+				)
 			self.state.agent_history_items.append(history_item)
 
 	def _get_sensitive_data_description(self, current_page_url) -> str:
@@ -306,6 +324,7 @@ class MessageManager:
 		sensitive_data=None,
 		available_file_paths: list[str] | None = None,  # Always pass current available_file_paths
 		unavailable_skills_info: str | None = None,  # Information about skills that cannot be used yet
+		workflow_mode: Literal['react', 'record', 'replay'] = 'react',
 	) -> None:
 		"""Create single state message with all content"""
 
@@ -313,7 +332,7 @@ class MessageManager:
 		self.state.history.context_messages.clear()
 
 		# First, update the agent history items with the latest step results
-		self._update_agent_history_description(model_output, result, step_info)
+		self._update_agent_history_description(model_output, result, step_info, workflow_mode)
 
 		# Use the passed sensitive_data parameter, falling back to instance variable
 		effective_sensitive_data = sensitive_data if sensitive_data is not None else self.sensitive_data
@@ -373,6 +392,7 @@ class MessageManager:
 			read_state_images=self.state.read_state_images,
 			llm_screenshot_size=self.llm_screenshot_size,
 			unavailable_skills_info=unavailable_skills_info,
+			workflow_mode=workflow_mode,
 		).get_user_message(effective_use_vision)
 
 		# Store state message text for history

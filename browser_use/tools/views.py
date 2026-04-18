@@ -54,6 +54,41 @@ class InputTextAction(BaseModel):
 	clear: bool = Field(default=True, description='1=clear, 0=append')
 
 
+class QueryElementsAction(BaseModel):
+	selector: str = Field(description='CSS selector used with document.querySelectorAll to collect matching DOM elements')
+	output_variable: str = Field(description='Workflow variable name that will receive a list of matched element references')
+	within_selector: str | None = Field(default=None, description='Optional parent CSS selector used to narrow the search scope')
+	visible_only: bool = Field(default=False, description='If true, only include elements considered visible in the viewport/layout')
+
+
+class ElementExistsAction(BaseModel):
+	element_variable: str | None = Field(default=None, description='Optional workflow variable referencing a previously queried element')
+	selector: str | None = Field(default=None, description='CSS selector to test globally or relative to element_variable')
+	within_selector: str | None = Field(default=None, description='Optional parent CSS selector used to narrow the search scope when element_variable is not set')
+	output_variable: str = Field(description='Workflow variable name that will receive a boolean result')
+
+
+class GetTextAction(BaseModel):
+	element_variable: str | None = Field(default=None, description='Optional workflow variable referencing a previously queried element')
+	selector: str | None = Field(default=None, description='CSS selector to read text from globally or relative to element_variable')
+	within_selector: str | None = Field(default=None, description='Optional parent CSS selector used to narrow the search scope when element_variable is not set')
+	output_variable: str = Field(description='Workflow variable name that will receive the extracted text')
+
+
+class GetAttributeAction(BaseModel):
+	element_variable: str | None = Field(default=None, description='Optional workflow variable referencing a previously queried element')
+	selector: str | None = Field(default=None, description='CSS selector to resolve globally or relative to element_variable')
+	within_selector: str | None = Field(default=None, description='Optional parent CSS selector used to narrow the search scope when element_variable is not set')
+	name: str = Field(description='Attribute name to read from the resolved element')
+	output_variable: str = Field(description='Workflow variable name that will receive the attribute value')
+
+
+class ClickTargetAction(BaseModel):
+	element_variable: str | None = Field(default=None, description='Optional workflow variable referencing a previously queried element')
+	selector: str | None = Field(default=None, description='CSS selector to click globally or relative to element_variable')
+	within_selector: str | None = Field(default=None, description='Optional parent CSS selector used to narrow the search scope when element_variable is not set')
+
+
 class DoneAction(BaseModel):
 	text: str = Field(description='Final user message in the format the user requested')
 	success: bool = Field(default=True, description='True if user_request completed successfully')

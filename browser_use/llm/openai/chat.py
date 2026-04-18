@@ -1,5 +1,8 @@
+import logging
+import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, TypeVar, overload
 
 import httpx
@@ -19,6 +22,8 @@ from browser_use.llm.schema import SchemaOptimizer
 from browser_use.llm.views import ChatInvokeCompletion, ChatInvokeUsage
 
 T = TypeVar('T', bound=BaseModel)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -255,7 +260,48 @@ class ChatOpenAI(BaseChatModel):
 
 				usage = self._get_usage(response)
 
-				parsed = output_format.model_validate_json(response.choices[0].message.content)
+				response_content = response.choices[0].message.content
+				try:
+					parsed = output_format.model_validate_json(response_content)
+				except Exception as parse_error:
+					finish_reason = response.choices[0].finish_reason if response.choices else None
+					response_length = len(response_content) if response_content is not None else 0
+					dump_path_str: str | None = None
+					if response_content is not None:
+						dump_dir = Path(tempfile.gettempdir()) / 'browser_use_llm_raw_responses'
+						dump_dir.mkdir(parents=True, exist_ok=True)
+						dump_path = dump_dir / f"{self.name.replace('/', '_')}_structured_output_error.txt"
+						dump_path.write_text(response_content, encoding='utf-8')
+						dump_path_str = str(dump_path)
+
+					error_summary = (
+						f'Structured output validation failed '
+						f'(finish_reason={finish_reason}, response_length={response_length})'
+					)
+					if finish_reason == 'length':
+						user_facing_message = (
+							f'{error_summary}. 模型输出被截断，返回了不完整 JSON。'
+						)
+					else:
+						user_facing_message = (
+							f'{error_summary}. 模型返回了完整响应，但结构不符合要求。'
+						)
+
+					logger.error(f'❌ {user_facing_message}')
+					if dump_path_str:
+						logger.error(f'❌ response_content_dump_file={dump_path_str}')
+					if response_content is not None:
+						logger.error(f'❌ response_content_head_1200=\n{response_content[:1200]}')
+						logger.error(f'❌ response_content_tail_1200=\n{response_content[-1200:]}')
+
+					raise ModelProviderError(
+						message=str(parse_error),
+						model=self.name,
+						user_facing_message=user_facing_message,
+						error_summary=error_summary,
+						dump_file=dump_path_str,
+						finish_reason=finish_reason,
+					) from parse_error
 
 				return ChatInvokeCompletion(
 					completion=parsed,
